@@ -1,5 +1,10 @@
-server
-client
-messages.c
-messages.h
+/build/
+/credentials/
+/messages.c
+/messages.h
+/server
+/client
+/test_validation
 *.o
+/core
+/core.*
