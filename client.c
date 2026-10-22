@@ -11,6 +11,7 @@
 
 #include <GLFW/glfw3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
 #include "dds/dds.h"
@@ -76,6 +77,10 @@ void draw_text(float x, float y, float scale, const char *text)
 
 void *worker(void *arg)
 {
+
+    // This worker does not use the argument passed by pthread_create
+    (void)arg;
+
 	dds_entity_t participant;
 	dds_entity_t join_topic;
 	dds_entity_t response_topic;
@@ -107,7 +112,9 @@ void *worker(void *arg)
     if (participant < 0)
     {
         printf("Failed to create participant\n");
-        //return 1;
+
+        // Stop the program if the DDS participant could not be created
+        exit(EXIT_FAILURE);
     }
 
     /* ----------------------------------------------------- */
@@ -200,6 +207,10 @@ void *worker(void *arg)
 	/* printf("last_join_req_time = %" PRIu64 "\n", last_join_req_time); */
 	while (1)
 	{
+
+        // Wait 1 ms before checking again so this loop does not keep the CPU busy
+        dds_sleepfor(DDS_MSECS(1));
+
 		// If not in a game yet
 		pthread_mutex_lock(&mutex);
 		int int_player_id_temp = int_player_id;
@@ -219,7 +230,7 @@ void *worker(void *arg)
 				JoinResponse *response = (JoinResponse *) samples_response[0];
 				int int_resp_player_id = response->int_player_id;
 				// If server responded with an invalid player ID
-				if (int_resp_player_id == 0)
+				if (int_resp_player_id < 1 || int_resp_player_id > MAX_PLAYERS)
 					printf("Unable to join\n");
 				else
 				{
@@ -267,7 +278,9 @@ void *worker(void *arg)
 			{
 				// Create a fresh input
 				Input input;
-				input.int_player_id = int_player_id;
+
+				// Use the player ID already copied while the mutex was locked
+				input.int_player_id = int_player_id_temp;
 				
 				// Set the direction in the message
 				input.ch_direction = ch_dir_temp;			
@@ -297,7 +310,13 @@ void *worker(void *arg)
 			printf("Position received\n");
 			Position *position = (Position *) samples_position[0];
 			// Get the player ID
-			int int_position_player_id = position->int_player_id;			
+			int int_position_player_id = position->int_player_id;
+
+            // Skip this position if the player ID or coordinates are outside the allowed range
+            if (int_position_player_id < 1 || int_position_player_id > MAX_PLAYERS ||
+                position->int_x < 0 || position->int_x > WIDTH - SQ_WIDTH ||
+                position->int_y < 0 || position->int_y > HEIGHT - SQ_WIDTH)
+                continue;
 			pthread_mutex_lock(&mutex);
 			// Set this player to active
 			arr_Players[int_position_player_id-1].b_active = true;
@@ -391,9 +410,16 @@ int main(void)
 		
 		
 		char str_banner[100] = "Waiting for server ...";
-		if (int_player_id != -1)
+		pthread_mutex_lock(&mutex);
+
+		// Copy the player ID while the worker cannot change it
+		int display_player_id = int_player_id;
+		pthread_mutex_unlock(&mutex);
+
+		// Use the copied player ID when creating the banner text
+		if (display_player_id != -1)
 		{
-			snprintf(str_banner, sizeof(str_banner), "Player %d", int_player_id);
+			snprintf(str_banner, sizeof(str_banner), "Player %d", display_player_id);
 		}
 		draw_text(320, 20, 3.0f, str_banner);
 		

@@ -91,6 +91,10 @@ bool detect_collision(Player a_arr_players[], int a_int_arr_len,
 
 void *worker(void *arg)
 {
+
+    // This worker does not use the argument passed by pthread_create
+    (void)arg;
+
 	dds_entity_t participant;
 	dds_entity_t join_topic;
 	dds_entity_t response_topic;
@@ -123,7 +127,9 @@ void *worker(void *arg)
     if (participant < 0)
     {
         printf("Failed to create participant\n");
-        //return 1;
+
+        // Stop the program if the DDS participant could not be created
+        exit(EXIT_FAILURE);
     }
 
     /* ----------------------------------------------------- */
@@ -217,6 +223,10 @@ void *worker(void *arg)
 	/* Poll until data has been read. */
 	while (1)
 	{
+
+        // Wait 1 ms before checking again so this loop does not keep the CPU busy
+        dds_sleepfor(DDS_MSECS(1));
+
 		// Process a join request
 		rc = dds_take(join_reader, samples_join, infos_join, MAX_SAMPLES, MAX_SAMPLES);
 		
@@ -304,7 +314,26 @@ void *worker(void *arg)
 			int int_input_player_id = input->int_player_id;
 			// Get the input direction
 			char ch_input_dir = input->ch_direction;
-			/* printf("%d=%c\n", int_input_player_id, ch_input_dir); */
+
+            // Skip this input if the player ID is outside the player array
+            if (int_input_player_id < 1 || int_input_player_id > MAX_PLAYERS)
+                continue;
+
+            // Skip this input if the direction is not one of the four arrow keys
+            if (ch_input_dir != 'l' && ch_input_dir != 'r' &&
+                ch_input_dir != 'u' && ch_input_dir != 'd')
+                continue;
+
+            // Lock the player array before checking if this player is active
+            pthread_mutex_lock(&mutex);
+
+            // Get this player's active status using the checked player ID
+            bool active = arr_Players[int_input_player_id - 1].b_active;
+            pthread_mutex_unlock(&mutex);
+
+            // Skip this input if nobody is using this player slot
+            if (!active)
+                continue;
 			
 			// Get the player's current coords
 			pthread_mutex_lock(&mutex);
@@ -383,6 +412,10 @@ int main(void)
 	printf("Waiting...\n");
 	while (1)
 	{
+
+        // Wait 1 ms before checking again so this loop does not keep the CPU busy
+        dds_sleepfor(DDS_MSECS(1));
+
 		// for(int i = 0; i < MAX_PLAYERS; i++)
 		// {
 			//printf("%d %d %d\n",i,arr_Players[i].x, arr_Players[i].y);
