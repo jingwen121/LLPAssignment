@@ -23,3 +23,33 @@ struct Position
 	long int_x;
 	long int_y;
 };
+
+struct PlayerState
+{
+    boolean active;
+    long x;
+    long y;
+    long score;
+};
+
+struct CoinState
+{
+    boolean active;
+    long x;
+    long y;
+    boolean gold;
+};
+
+struct GameState
+{
+    unsigned long long seq;
+
+    // Use 0 for waiting, 1 for playing and 2 for results
+    long state;
+    long remaining_ms;
+
+    // Use 0 for a tie or no winner, otherwise use the player ID
+    long winner_id;
+    PlayerState players[5];
+    CoinState coins[5];
+};
