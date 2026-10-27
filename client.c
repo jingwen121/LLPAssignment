@@ -407,7 +407,7 @@ void *worker(void *arg)
     return NULL;
 }
 
-int main(void)
+int legacy_main(void)
 {
 	pthread_t thread;
 
@@ -530,4 +530,127 @@ int main(void)
     glfwTerminate();
 
     return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *credentials = argc > 1 ? argv[1] : "credentials/client1";
+	pthread_t thread;
+
+    if (pthread_create(&thread, NULL, worker, (void *)credentials) != 0)
+    {
+        perror("pthread_create");
+        return 1;
+    }
+	
+	
+    if (!glfwInit())
+    {
+        atomic_store(&running, false);
+        pthread_join(thread, NULL);
+        return 1;
+    }
+
+    GLFWwindow *window =
+        glfwCreateWindow(WIDTH, HEIGHT, "Coin Rush", NULL, NULL);
+
+    if (!window)
+    {
+        atomic_store(&running, false);
+        pthread_join(thread, NULL);
+        glfwTerminate();
+        return 1;
+    }
+
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
+    /* Use pixel coordinates */
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    /* glOrtho(0, WIDTH, 0, HEIGHT, -1, 1); */
+	glOrtho(0, WIDTH, HEIGHT, 0, -1, 1);
+
+  /*   glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity(); */
+
+    while (atomic_load(&running) && !glfwWindowShouldClose(window))
+    {
+		 /* Process keyboard/window events */
+        glfwPollEvents();
+
+        /* Non-blocking keyboard input */
+		if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)
+		{
+			pthread_mutex_lock(&mutex);
+			ch_dir = 'l';
+			pthread_mutex_unlock(&mutex);
+		}
+		
+		else if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS)
+		{
+			pthread_mutex_lock(&mutex);
+			ch_dir = 'r';
+			pthread_mutex_unlock(&mutex);
+		}
+		
+		else
+		{
+			pthread_mutex_lock(&mutex);
+			ch_dir = 'n';
+			pthread_mutex_unlock(&mutex);
+		}
+		
+		glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+		glColor3f(1.0f, 0.0f, 0.0f);
+		
+		
+		char str_banner[100] = "Waiting for server ...";
+		pthread_mutex_lock(&mutex);
+
+		// Copy the player ID while the worker cannot change it
+		int display_player_id = int_player_id;
+		pthread_mutex_unlock(&mutex);
+
+		// Use the copied player ID when creating the banner text
+		if (display_player_id != -1)
+		{
+			snprintf(str_banner, sizeof(str_banner), "Player %d", display_player_id);
+		}
+		draw_text(320, 20, 3.0f, str_banner);
+		
+		for(int i = 0; i < MAX_PLAYERS; i++)
+		{
+			pthread_mutex_lock(&mutex);
+			if(arr_Players[i].b_active == true)
+			{
+				// Label the player ID
+				char str_player[2] = "";
+				snprintf(str_player, sizeof(str_player), "%d", i+1);
+				/* printf("Coords = %d, %d\n",arr_Players[i].x, arr_Players[i].y);				 */
+				/* draw_text(100, 400, 3.0f, str_banner); */
+				
+				draw_text(arr_Players[i].x, arr_Players[i].y, 3.0f, str_player);				
+				
+				glBegin(GL_LINE_LOOP);
+					glVertex2f(arr_Players[i].x, arr_Players[i].y);
+					glVertex2f(arr_Players[i].x, arr_Players[i].y + SQ_WIDTH);
+					glVertex2f(arr_Players[i].x + SQ_WIDTH, arr_Players[i].y + SQ_WIDTH);
+					glVertex2f(arr_Players[i].x + SQ_WIDTH, arr_Players[i].y);
+				glEnd();
+			}
+			pthread_mutex_unlock(&mutex);			
+		}
+        glfwSwapBuffers(window);
+    }
+
+    // Stop the networking worker before freeing the window
+    atomic_store(&running, false);
+    pthread_join(thread, NULL);
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
+
+    return atomic_load(&worker_status);
 }
