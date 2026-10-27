@@ -30,7 +30,7 @@
 //      Output data assumes increasing x is rightwards, increasing y
 //      is downwards.
 //
-//      The vertex data is divided into quads, i.e. there are four
+//      The vertex data is divided into quads, i.e. there are 4
 //      vertices in the vertex buffer for each quad.
 //
 //      The vertices are stored in an interleaved format:
@@ -60,7 +60,7 @@
 //      and small negative values (no smaller than -1.5) to contract
 //      the space between characters.
 //
-//      E.g. spacing = 1 adds one "pixel" of spacing between the
+//      E.g. spacing = 1 adds 1 "pixel" of spacing between the
 //      characters. spacing = -1 is reasonable but feels a bit too
 //      compact to me; -0.5 is a reasonable compromise as long as
 //      you're scaling the font up.
@@ -71,7 +71,7 @@
 //
 // VERSION HISTORY
 //
-//   (2020-02-02)  1.1   make everything static so can compile it in more than one src file
+//   (2020-02-02)  1.1   make everything static so can compile it in more than 1 src file
 //   (2017-01-15)  1.0   space character takes same space as numbers; fix bad spacing of 'f'
 //   (2016-01-22)  0.7   width() supports multiline text; add height()
 //   (2015-09-13)  0.6   #include <math.h>; updated license

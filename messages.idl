@@ -1,20 +1,38 @@
-//idlc -l c messages.idl
+// make regenerates the C types from this file; do not edit build/messages.h
+// All 3 team members use these types so the client cannot invent its own state
 
 struct JoinRequest
 {
-	boolean b_dummy;
+    boolean b_dummy;
+    // This routes the reply; the server still checks the GUID against DDS metadata
+    octet client_id[16];
 };
 
 struct JoinResponse
 {
-	//IDL needs int width to be clearly defined
+    octet client_id[16];
+
+    // Use 0 when the server has no free player slots
     long int_player_id;
+
+    // A fresh admission gets a fresh token; delayed input from an old slot is rejected
+    // This is sent inside encrypted DDS traffic and is not a substitute for DDS auth
+    unsigned long long session_id;
 };
 
 struct Input
 {
-	long int_player_id;
+    // Send intent only; the server remains responsible for position and scoring
+    long int_player_id;
+
+    // l/r move horizontally, n keeps the connection alive and q leaves the game
     char ch_direction;
+
+    // Increase this for every input and heartbeat
+    unsigned long long seq;
+
+    // Echo the token from JoinResponse for movement, heartbeats and leaving
+    unsigned long long session_id;
 };
 
 struct Position
@@ -26,7 +44,10 @@ struct Position
 
 struct PlayerState
 {
+    // Array index + 1 is the player ID; inactive entries are cleared on disconnect
     boolean active;
+
+    // Top-left of a 50x50 player inside the 800x600 arena, in pixels
     long x;
     long y;
     long score;
@@ -35,21 +56,25 @@ struct PlayerState
 struct CoinState
 {
     boolean active;
+
+    // Coin centres can start above the screen; the server decides the actual spawn height
     long x;
     long y;
-    boolean gold;
+    boolean gold; // the server awards 3 points for gold; the client only displays this flag
 };
 
 struct GameState
 {
+    // 1 sequence covers the entire snapshot so scores and positions stay together
     unsigned long long seq;
 
     // Use 0 for waiting, 1 for playing and 2 for results
     long state;
     long remaining_ms;
 
-    // Use 0 for a tie or no winner, otherwise use the player ID
+    // Use 0 for a tie or no winner; the client interprets this together with the round state
     long winner_id;
+    // Fixed arrays bound message size; no network-controlled allocation is needed
     PlayerState players[5];
     CoinState coins[5];
 };
