@@ -342,3 +342,38 @@ def loss():
             subprocess.run(["tc", "qdisc", "del", "dev", "lo", "root"], check=True)
 
 
+def main():
+    require(len(sys.argv) == 2 and sys.argv[1] in ("check", "sanitize", "profile", "wire", "loss"),
+            "Usage: python3 qa.py check|sanitize|profile|wire|loss")
+    os.chdir(ROOT)
+    prepare()
+    mode = sys.argv[1]
+    if mode == "check":
+        checks()
+    elif mode == "sanitize":
+        env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
+                   UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
+        run(["./build/test_sanitized", TRUSTED], "sanitizers.log", env=env)
+        # Also exercise the actual threaded server adapter; the protocol fixture
+        # alone cannot find memory errors in its main/worker handoff or shutdown
+        with running(["./build/server_sanitized", TRUSTED / "server"],
+                     "sanitized-server.log", env) as server:
+            run(["./build/test_sanitized", "--link", TRUSTED / "client1"],
+                "sanitized-link.log", env=env)
+            server.send_signal(signal.SIGINT)
+            require(server.wait(timeout=5) == 0, "Sanitized game server failed on shutdown")
+    elif mode == "profile":
+        profile()
+    elif mode == "wire":
+        wire()
+    else:
+        loss()
+    print(f"Finished {mode}; evidence: {WORK}", flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        sys.exit(1)
