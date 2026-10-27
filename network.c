@@ -288,19 +288,134 @@ NetEvent net_server_poll(Network *net)
     return (NetEvent){0};
 }
 
-    net_close(net);
-    return false;
+bool net_server_state(Network *net, GameState *state)
+{
+    // Give each complete snapshot a seq so clients can discard old state
+    state->seq = ++net->state_sequence;
+    return checked(dds_write(net->state, state), "Send game state");
 }
 
-static bool sender(dds_entity_t reader, const dds_sample_info_t *info, dds_guid_t *id)
+bool net_client_send(Network *net, char direction)
 {
-    // Get the sender from DDS metadata instead of trusting an ID in the message
-    dds_builtintopic_endpoint_t *data =
-        dds_get_matched_publication_data(reader, info->publication_handle);
-    if (!data)
+    int64_t now = net_now();
+
+    if (now - net->last_state >= NET_TIMEOUT_NS)
+    {
+        // Clear the old server after a timeout and start joining again
+        net->player_id = -1;
+        net->session_id = 0;
+        net->server_id = (dds_guid_t){0};
+        net->state_sequence = 0;
+    }
+
+    if (net->player_id == -1)
+    {
+        if (now - net->last_join < INT64_C(500000000))
+            return true;
+
+        JoinRequest request;
+        memcpy(request.client_id, net->own_id.v, sizeof(request.client_id));
+        net->last_join = now;
+        return checked(dds_write(net->join, &request), "Send join request");
+    }
+
+    // Send idle heartbeats every 100 ms and movement no faster than every 10 ms
+    int64_t interval = direction == 'n' ? INT64_C(100000000) : NET_INPUT_NS;
+    if (direction != 'q' && now - net->last_input < interval)
+        return true;
+
+    Input input = {net->player_id, direction, ++net->seq, net->session_id};
+    net->last_input = now;
+    return checked(dds_write(net->input, &input), "Send input");
+}
+
+static bool valid_state(const GameState *state)
+{
+    // Even authenticated data is checked before the client uses it for rendering; keep
+    // these transport bounds aligned with the IDL contract; do not decide game
+    // rules here, such as who wins or whether a disconnected score is retained
+    if (state->state < 0 || state->state > 2 || state->remaining_ms < 0 ||
+        state->remaining_ms > 60000 || state->winner_id < 0 || state->winner_id > NET_PLAYERS)
         return false;
 
-    *id = data->participant_key;
-    dds_builtintopic_free_endpoint(data);
+    for (int i = 0; i < NET_PLAYERS; ++i)
+    {
+        const PlayerState *player = &state->players[i];
+        if (player->x < 0 || player->x > 750 || player->y < 0 || player->y > 550 ||
+            player->score < 0)
+            return false;
+    }
+
+    for (int i = 0; i < NET_COINS; ++i)
+    {
+        if (state->coins[i].x < 0 || state->coins[i].x > 800 ||
+            state->coins[i].y < -600 || state->coins[i].y > 600)
+            return false;
+    }
     return true;
+}
+
+bool net_client_state(Network *net, GameState *state)
+{
+    JoinResponse response;
+    dds_sample_info_t info;
+    dds_guid_t owner;
+
+    if (take(net->response, &response, &info) && net->player_id == -1 &&
+        memcmp(response.client_id, net->own_id.v, sizeof(response.client_id)) == 0 &&
+        response.int_player_id >= 1 && response.int_player_id <= NET_PLAYERS &&
+        response.session_id != 0 &&
+        sender(net->response, &info, &owner))
+    {
+        net->player_id = response.int_player_id;
+        net->session_id = response.session_id;
+        net->server_id = owner;
+        net->state_sequence = 0;
+        net->last_state = net_now();
+    }
+
+    GameState sample;
+    if (!take(net->state, &sample, &info) || net->player_id == -1)
+        return false;
+
+    // Only accept snapshots from the server that assigned this player slot
+    if (!sender(net->state, &info, &owner) || !same_id(&owner, &net->server_id) ||
+        sample.seq <= net->state_sequence || !valid_state(&sample))
+    {
+        ++net->rejected;
+        return false;
+    }
+
+    // Commit only after every check passes; malformed data must not partially
+    // replace the display or keep a dead connection alive
+    *state = sample;
+    net->state_sequence = sample.seq;
+    net->last_state = net_now();
+    ++net->received;
+
+    // Rejoin if the server no longer includes this player in its active slots
+    if (!state->players[net->player_id - 1].active)
+    {
+        net->player_id = -1;
+        net->session_id = 0;
+    }
+
+    return true;
+}
+
+void net_close(Network *net)
+{
+    if (net->participant <= 0)
+        return;
+
+    if (!net->server && net->player_id > 0)
+    {
+        // Let the server acknowledge the leave before deleting this writer
+        Input leave = {net->player_id, 'q', ++net->seq, net->session_id};
+        if (dds_write(net->input, &leave) == DDS_RETCODE_OK)
+            dds_wait_for_acks(net->input, DDS_MSECS(200));
+    }
+
+    dds_delete(net->participant);
+    net->participant = 0;
 }
