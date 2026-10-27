@@ -537,7 +537,7 @@ void *worker(void *arg)
     return NULL;
 }
 
-int main(void)
+int legacy_main(void)
 {
 	// Seed rand(), so that the random numbers are different for each run
 	srand((unsigned int)time(NULL));
@@ -632,4 +632,74 @@ int main(void)
 	}
 	
 	return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *credentials = argc > 1 ? argv[1] : "credentials/server";
+    srand((unsigned int)time(NULL));
+    signal(SIGINT, stop_server);
+    signal(SIGTERM, stop_server);
+	
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, worker, (void *)credentials) != 0)
+    {
+        perror("pthread_create");
+        return 1;
+    }
+	
+    printf("Waiting for players...\n");
+    while (atomic_load(&running))
+    {
+        pthread_mutex_lock(&mutex);
+        if (b_player_join)
+        {
+            // Return 0 if all player slots are already active
+            b_player_join = false;
+            int_new_player_id = 0;
+
+            for (int i = 0; i < MAX_PLAYERS; ++i)
+            {
+                if (arr_Players[i].b_active)
+                    continue;
+
+                // Keep the baseline spawn calculation in the game thread
+                int x = 0;
+                int y = 0;
+                bool found = false;
+                for (int attempt = 0; attempt < 1000; ++attempt)
+                {
+                    x = rand() % (WIDTH - SQ_WIDTH + 1);
+                    y = rand() % (HEIGHT - SQ_WIDTH + 1);
+                    if (!detect_collision(arr_Players, MAX_PLAYERS, i + 1, x, y))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                    break;
+
+                // Set this player to active and save the assigned player ID
+                arr_Players[i] = (Player){true, x, y, 0};
+                ++int_num_active_players;
+                int_new_player_id = i + 1;
+                break;
+            }
+
+            // Wake the worker now that the player slot has been assigned
+            pthread_cond_signal(&join_ready);
+        }
+        pthread_mutex_unlock(&mutex);
+        dds_sleepfor(DDS_MSECS(1));
+    }
+
+    // Wake the worker if shutdown happened while it was waiting for a slot
+    // Joining before returning keeps its stack arguments and shared state alive
+    pthread_mutex_lock(&mutex);
+    pthread_cond_broadcast(&join_ready);
+    pthread_mutex_unlock(&mutex);
+    pthread_join(thread, NULL);
+    return atomic_load(&worker_status);
 }
