@@ -158,3 +158,80 @@ def checks():
     print("PASS security checks against the real game server", flush=True)
 
 
+def cpu_sample(process):
+    # /proc reports the process's accumulated user and kernel CPU ticks, including
+    # its threads; 1 fully occupied logical core therefore corresponds to 100%
+    fields = Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()
+    cpu = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    status = Path(f"/proc/{process.pid}/status").read_text().splitlines()
+    peak = int(next(line for line in status if line.startswith("VmHWM:")).split()[1])
+    return cpu, peak
+
+
+def profile():
+    # Make a controlled comparison from the current source; removing exactly the
+    # 2 polling sleeps changes only idle scheduling; security and compiler flags
+    # stay identical; this is an experiment, not a second production server mode
+    source = (ROOT / "server.c").read_text()
+    sleep = "dds_sleepfor(DDS_MSECS(1));"
+    require(source.count(sleep) == 2, "Update the polling experiment for the changed server")
+    busy_source = WORK / "server-busy.c"
+    busy_source.write_text(source.replace(sleep, "(void)0; /* QA busy-poll control */"))
+    flags = shlex.split(subprocess.check_output(
+        ["pkg-config", "--cflags", "--libs", "CycloneDDS"], text=True))
+    busy = WORK / "server-busy"
+    run(["gcc", "-std=c11", "-D_DEFAULT_SOURCE", "-O2", "-g", "-Wall", "-Wextra",
+         "-Wpedantic", "-I.", "-Ibuild", busy_source, "network.c", "build/messages.c",
+         "-o", busy, *flags, "-pthread"], "profile-build.log")
+
+    results = {}
+    for label, binary in (("busy_poll_control", busy), ("bounded_poll", "./build/server")):
+        samples = []
+        for trial in range(3):
+            with running([binary, TRUSTED / "server"], f"profile-{label}-{trial}.log") as process:
+                time.sleep(0.5)
+                before, _ = cpu_sample(process)
+                started = time.monotonic()
+                time.sleep(3)
+                after, peak = cpu_sample(process)
+                elapsed = time.monotonic() - started
+                samples.append({"seconds": round(elapsed, 3),
+                                "cpu_percent_one_core": round(100 * (after - before) / elapsed, 2),
+                                "peak_rss_kib": peak})
+        results[label] = samples
+
+    # Repeat at the 5-player capacity; each headless client sends movement and
+    # receives snapshots; graphics cost is outside this networking benchmark
+    with contextlib.ExitStack() as stack:
+        process = stack.enter_context(running(
+            ["./build/server", TRUSTED / "server"], "profile-loaded-server.log"))
+        clients = [stack.enter_context(running(
+            ["./build/test_validation", "--link", TRUSTED / f"client{i}"],
+            f"profile-client-{i}.log")) for i in range(1, 6)]
+        time.sleep(2)
+        before, _ = cpu_sample(process)
+        started = time.monotonic()
+        time.sleep(3)
+        after, peak = cpu_sample(process)
+        elapsed = time.monotonic() - started
+        results["five_clients"] = {"seconds": round(elapsed, 3),
+                                  "cpu_percent_one_core": round(100 * (after - before) / elapsed, 2),
+                                  "peak_rss_kib": peak}
+        for client in clients:
+            require(client.wait(timeout=8) == 0, "Loaded benchmark client failed")
+
+    (WORK / "profile.json").write_text(json.dumps(results, indent=2) + "\n")
+    print(json.dumps(results, indent=2), flush=True)
+
+    # Callgrind identifies where instructions are spent; its instruction counts
+    # are not CPU time; keep them separate from the normal-build measurements
+    require(shutil.which("valgrind"), "Install valgrind to collect the profiler evidence")
+    with running(["valgrind", "--tool=callgrind", f"--callgrind-out-file={WORK / 'callgrind.out'}",
+                  "./build/server", TRUSTED / "server"], "callgrind.log") as process:
+        time.sleep(5)
+        process.send_signal(signal.SIGINT)
+        require(process.wait(timeout=10) == 0, "Profiled server failed to stop")
+    run(["callgrind_annotate", "--inclusive=yes", "--threshold=95", WORK / "callgrind.out"],
+        "callgrind-report.txt")
+
+
