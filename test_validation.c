@@ -503,5 +503,149 @@ int main(int argc, char **argv)
     // than consume 3 more slots; the cumulative join count must stay at 2
     for (int i = 0; i < 3; ++i)
         command(0, RETRY_JOIN, 0, 0);
-    wait_ms(100);}
+    wait_ms(100);
+    CHECK(atomic_load(&shared->joins) == 2);
+    puts("PASS repeated join requests");
+
+    // Send client 1's claimed GUID through client 0's authenticated participant
+    // A rise in rejected confirms the server checked DDS metadata against it
+    uint64_t before = atomic_load(&shared->rejected);
+    memcpy(shared->clients[0].forged_guid, shared->clients[1].guid, 16);
+    command(0, FORGE_JOIN, 0, 0);
+    wait_ms(50);
+    CHECK(atomic_load(&shared->rejected) > before);
+    puts("PASS forged join identity rejected");
+
+    int id = player_id(0);
+    int old_moves = atomic_load(&shared->moves);
+    before = atomic_load(&shared->rejected);
+
+    // Cover below-range IDs, above-range IDs, a free slot and another live slot
+    // None may produce movement; the 2 bad directions add 2 more rejections
+    int invalid_ids[] = {0, -1, 6, INT_MAX, 5, player_id(1)};
+    for (size_t i = 0; i < sizeof(invalid_ids) / sizeof(invalid_ids[0]); ++i)
+    {
+        command(0, SEND_INPUT, invalid_ids[i], 'r');
+        wait_ms(30);
+    }
+    command(0, SEND_INPUT, id, 'x');
+    wait_ms(30);
+    command(0, SEND_INPUT, id, '\0');
+    wait_ms(30);
+    CHECK(atomic_load(&shared->moves) == old_moves);
+    CHECK(atomic_load(&shared->rejected) >= before + 8);
+    puts("PASS invalid IDs, inactive slot, invalid directions and impersonation rejected");
+
+    // Establish 1 accepted movement first; replaying that exact sequence must
+    // increase rejections without increasing the validated movement count
+    command(0, SEND_INPUT, id, 'r');
+    wait_ms(40);
+    CHECK(atomic_load(&shared->moves) == old_moves + 1);
+    before = atomic_load(&shared->rejected);
+    command(0, REPLAY, id, 'r');
+    wait_ms(40);
+    CHECK(atomic_load(&shared->moves) == old_moves + 1);
+    CHECK(atomic_load(&shared->rejected) > before);
+    puts("PASS valid movement and replay rejection");
+
+    old_moves = atomic_load(&shared->moves);
+    before = atomic_load(&shared->rejected);
+
+    // Judge accepted movement against elapsed server time, not the number of
+    // writes; bounded DDS history can discard old samples during the flood
+    int64_t started = net_now();
+    command(0, FLOOD, id, 'r');
+    wait_ms(100);
+    int64_t elapsed = net_now() - started;
+    int accepted = atomic_load(&shared->moves) - old_moves;
+    CHECK(accepted <= elapsed / NET_INPUT_NS + 1);
+    CHECK(atomic_load(&shared->rejected) > before);
+    printf("PASS flood: 2000 sends, %d moves in %.2f ms\n", accepted, elapsed / 1e6);
+
+    command(0, FORGE_STATE, 0, 0);
+    puts("PASS client cannot publish state/replies or subscribe to raw input");
+
+    // Wait for each rejection before sending the next malformed sample so a
+    // depth-1 reader cannot replace it before the client has a chance to inspect it
+    for (int kind = 1; kind <= 16; ++kind)
+    {
+        before = atomic_load(&shared->clients[0].rejected);
+        atomic_store(&shared->bad_snapshot, kind);
+        int64_t deadline = net_now() + INT64_C(1000000000);
+        while (atomic_load(&shared->clients[0].rejected) == before && net_now() < deadline)
+            wait_ms(1);
+        CHECK(atomic_load(&shared->clients[0].rejected) > before);
+    }
+
+    // Invalid high-sequence snapshots must not poison the client's sequence
+    // tracking; later valid snapshots should still advance its update count
+    int old_updates = atomic_load(&shared->clients[0].updates);
+    wait_ms(150);
+    CHECK(atomic_load(&shared->clients[0].updates) > old_updates);
+    puts("PASS 15 malformed snapshot cases, repeated snapshot and recovery");
+
+    // Both processes use this host's monotonic clock; measure DDS write to
+    // validated server event, excluding snapshots, rendering and parent polling
+    // Space samples beyond the movement limiter so rate rejection cannot skew it
+    int64_t latency[200];
+    int64_t total = 0;
+    for (int i = 0; i < 200; ++i)
+    {
+        wait_ms(12);
+        old_moves = atomic_load(&shared->moves);
+        int client = i % 2;
+        command(client, SEND_INPUT, player_id(client), 'r');
+        int64_t deadline = net_now() + INT64_C(1000000000);
+        while (atomic_load(&shared->moves) == old_moves && net_now() < deadline)
+            wait_ms(1);
+        CHECK(atomic_load(&shared->moves) == old_moves + 1);
+
+        latency[i] = atomic_load(&shared->received_at) -
+                     atomic_load(&shared->clients[client].sent_at);
+        total += latency[i];
+    }
+
+    // With 200 sorted samples, index 189 is the nearest-rank 95th percentile
+    qsort(latency, 200, sizeof(latency[0]), compare_time);
+    printf("BENCH 200 local inputs: mean %.3f ms, p95 %.3f ms, max %.3f ms\n",
+           total / 200e6, latency[189] / 1e6, latency[199] / 1e6);
+
+    // Reuse the same DDS participant and numeric slot after expiry; A fresh
+    // sequence with the previous token must still fail; sequence checks alone
+    // cannot distinguish 2 admissions belonging to the same participant
+    command(0, SAVE_SESSION, 0, 0);
+    uint64_t old_session = atomic_load(&shared->clients[0].session_id);
+    atomic_store(&shared->clients[0].pause, true);
+
+    // Wait beyond the 3-second lease; snapshots should tell this still-live
+    // client that its slot is inactive even though its sends are paused
+    wait_ms(3400);
+    CHECK(player_id(0) == -1);
+    atomic_store(&shared->clients[0].pause, false);
+    int64_t session_deadline = net_now() + INT64_C(3000000000);
+    while (player_id(0) == -1 && net_now() < session_deadline)
+        wait_ms(1);
+    CHECK(player_id(0) == id);
+    CHECK(atomic_load(&shared->clients[0].session_id) != old_session);
+    old_moves = atomic_load(&shared->moves);
+    before = atomic_load(&shared->rejected);
+    command(0, OLD_SESSION, id, 'r');
+    wait_ms(50);
+    CHECK(atomic_load(&shared->moves) == old_moves);
+    CHECK(atomic_load(&shared->rejected) > before);
+    command(0, SEND_INPUT, id, 'r');
+    wait_ms(50);
+    CHECK(atomic_load(&shared->moves) == old_moves + 1);
+    puts("PASS old admission token rejected after same-participant rejoin");
+
+    // 2 players are active again; start 4 more contenders for 3 slots
+    // Use a relative join count because the earlier rejoin also counted as a join
+    int previous_joins = atomic_load(&shared->joins);
+    for (int i = 2; i < 6; ++i)
+        atomic_store(&shared->clients[i].start, true);
+    wait_ms(2500);
+    CHECK(atomic_load(&shared->joins) == previous_joins + 3);
+
+    // Identify whichever of the 4 simultaneous clients was refused
+    int waiting = -1;}
 
