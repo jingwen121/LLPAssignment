@@ -198,3 +198,160 @@ static void test_server(const char *root)
     exit(0);
 }
 
+static void test_client(const char *root, int index)
+{
+    struct Client *report = &shared->clients[index];
+    while (!atomic_load(&report->start))
+        usleep(1000);
+
+    char directory[4096];
+    snprintf(directory, sizeof(directory), "%s/client%d", root, index + 1);
+    Network net;
+    if (!net_open(&net, false, directory))
+    {
+        atomic_store(&report->ready, -1);
+        exit(1);
+    }
+
+    // Publish the GUID before ready; the parent needs a real second identity
+    // when constructing an impersonation attempt from the first client
+    memcpy(report->guid, net.own_id.v, sizeof(report->guid));
+    atomic_store(&report->ready, 1);
+    uint64_t previous = 0;
+    uint64_t old_session = 0;
+
+    while (!atomic_load(&report->stop))
+    {
+        GameState snapshot;
+        if (net_client_state(&net, &snapshot))
+        {
+            atomic_fetch_add(&report->updates, 1);
+
+            // Verify the values, not just arrival counts; A schema mismatch can
+            // deliver a sample while making coins or HUD fields unusable for the client
+            CHECK(snapshot.state == 1 && snapshot.remaining_ms == 60000);
+            for (int i = 0; i < NET_COINS; ++i)
+                CHECK(snapshot.coins[i].active && snapshot.coins[i].x == i * 160 &&
+                      snapshot.coins[i].y == -i * 100 && snapshot.coins[i].gold == (i == 0));
+            for (int i = 0; i < NET_PLAYERS; ++i)
+                if (snapshot.players[i].active)
+                    CHECK(snapshot.players[i].score == 3);
+            atomic_fetch_add(&report->payload_checks, 1);
+        }
+
+        int command = atomic_load(&report->command);
+        if (command == SEND_INPUT || command == REPLAY || command == FLOOD ||
+            command == OLD_SESSION)
+        {
+            // REPLAY repeats a previous sequence; OLD_SESSION advances the
+            // sequence but supplies an expired token so we isolate that check
+            // FLOOD removes the normal send interval and attempts 2000 writes
+            int count = command == FLOOD ? 2000 : 1;
+            for (int i = 0; i < count; ++i)
+            {
+                Input input = {report->input_id, report->direction,
+                               command == REPLAY ? previous : ++net.seq,
+                               command == OLD_SESSION ? old_session : net.session_id};
+                if (command != REPLAY)
+                    previous = input.seq;
+
+                // Record send time immediately before writing to DDS
+                atomic_store(&report->sent_at, net_now());
+                CHECK(dds_write(net.input, &input) == DDS_RETCODE_OK);
+            }
+        }
+        else if (command == RETRY_JOIN || command == FORGE_JOIN)
+        {
+            // A retry uses our real GUID; a forgery claims another participant's
+            // GUID while DDS metadata still identifies this sending process
+            JoinRequest request;
+            memcpy(request.client_id, command == RETRY_JOIN ? report->guid :
+                   report->forged_guid, sizeof(request.client_id));
+            CHECK(dds_write(net.join, &request) == DDS_RETCODE_OK);
+        }
+        else if (command == FORGE_STATE)
+        {
+            // Both server-owned topics must reject client writers; this checks
+            // DDS permissions, not a voluntary restriction in our client API
+            dds_entity_t topic = dds_create_topic(net.participant, &GameState_desc,
+                                                  "GameState", NULL, NULL);
+            CHECK(topic > 0);
+            CHECK(dds_create_writer(net.participant, topic, NULL, NULL) < 0);
+            topic = dds_create_topic(net.participant, &JoinResponse_desc,
+                                    "JoinResponse", NULL, NULL);
+            CHECK(topic > 0);
+            CHECK(dds_create_writer(net.participant, topic, NULL, NULL) < 0);
+
+            // Clients also have no reason to read another player's raw inputs
+            topic = dds_create_topic(net.participant, &Input_desc, "Input", NULL, NULL);
+            CHECK(topic > 0);
+            CHECK(dds_create_reader(net.participant, topic, NULL, NULL) < 0);
+        }
+        else if (command == SAVE_SESSION)
+            old_session = net.session_id;
+        else if (command == CLOSE)
+        {
+            net_close(&net);
+            atomic_store(&report->done, 1);
+            exit(0);
+        }
+
+        if (command != 0)
+        {
+            // Clear the request before signalling completion; otherwise the
+            // next parent command could be erased by this child's old request
+            atomic_store(&report->command, 0);
+            atomic_store(&report->done, 1);
+        }
+
+        if (!atomic_load(&report->pause))
+            CHECK(net_client_send(&net, 'n'));
+
+        // Report the network layer's current assignment, including -1 after
+        // timeout; do not infer connection state from the last drawn snapshot
+        atomic_store(&report->player_id, net.player_id);
+        atomic_store(&report->session_id, net.session_id);
+        atomic_store(&report->rejected, net.rejected);
+        dds_sleepfor(DDS_MSECS(1));
+    }
+    net_close(&net);
+    exit(0);
+}
+
+static void wait_ms(int milliseconds)
+{
+    usleep((useconds_t)milliseconds * 1000);
+}
+
+static void command(int client, int operation, int id, char direction)
+{
+    struct Client *report = &shared->clients[client];
+
+    // The atomic command store publishes these arguments to the child; only
+    // 1 request is outstanding per client, so no command queue is needed
+    report->input_id = id;
+    report->direction = direction;
+    atomic_store(&report->done, 0);
+    atomic_store(&report->command, operation);
+
+    // A failed child must produce a failed test instead of an endless wait
+    int64_t deadline = net_now() + INT64_C(2000000000);
+    while (!atomic_load(&report->done) && net_now() < deadline)
+        wait_ms(1);
+    CHECK(atomic_load(&report->done));
+}
+
+static int player_id(int client)
+{
+    return atomic_load(&shared->clients[client].player_id);
+}
+
+static int compare_time(const void *a, const void *b)
+{
+    // Compare without subtracting timestamps; qsort needs an int result and
+    // narrowing a large nanosecond difference could reverse the ordering
+    int64_t x = *(const int64_t *)a;
+    int64_t y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
