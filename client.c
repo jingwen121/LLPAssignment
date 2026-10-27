@@ -1,10 +1,10 @@
-/* gcc client.c messages.c -o client $(pkg-config --cflags --libs glfw3) -lGL $(pkg-config --cflags --libs CycloneDDS) -pthread -lm*/
+// Build with make and run ./build/client credentials/client1
 
 /* Dr Khoo Teck Ping
 27 Aug 2026
 1. DDS client
 2. Supports max 5 clients
-3. Start server, then start client one by one
+3. Start the server before starting clients
 4. Each client can see itself and all other clients
 5. Each client can move itself using the arrow keys
 6. Collision detection among all players and the window is supported */
@@ -12,8 +12,11 @@
 #include <GLFW/glfw3.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdatomic.h>
+#include "network.h"
 #include "dds/dds.h"
 #include "messages.h"
 #include "stb_easy_font.h"
@@ -35,6 +38,7 @@ typedef struct
     bool b_active;
     int x;
     int y;
+    int score;
 } Player;
 
 // ### GLOBAL VARIABLES ###
@@ -47,6 +51,16 @@ static Player arr_Players[MAX_PLAYERS] = {0};
 // Direction - n means no direction
 char ch_dir = 'n';
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// OpenGL stays on main; this worker owns all DDS handles; atomic flags carry
+// shutdown and startup failure without racing with the window loop
+static atomic_bool running = true;
+static atomic_int worker_status = 0;
+
+// Read this complete snapshot under mutex for the HUD,
+// coins and result screen; keep rendering based on server data, including scores
+static GameState game_state;
+
 
 void draw_text(float x, float y, float scale, const char *text)
 {
@@ -75,7 +89,7 @@ void draw_text(float x, float y, float scale, const char *text)
     glPopMatrix();
 }
 
-void *worker(void *arg)
+void *legacy_worker(void *arg)
 {
 
     // This worker does not use the argument passed by pthread_create
@@ -329,11 +343,75 @@ void *worker(void *arg)
 	}
 }
 
+void *worker(void *arg)
+{
+    Network net;
+
+    // Use only this client's certificate directory when creating the participant
+    if (!net_open(&net, false, arg))
+    {
+        atomic_store(&worker_status, 1);
+        atomic_store(&running, false);
+        return NULL;
+    }
+
+    while (atomic_load(&running))
+    {
+        // Take a small copy of the current input intent; never keep mutex locked across
+        // DDS operations; discovery or reliable delivery can take time to finish
+        pthread_mutex_lock(&mutex);
+        char direction = ch_dir;
+        pthread_mutex_unlock(&mutex);
+
+        // Poll before sending so a newly assigned ID and admission token are
+        // available to the next heartbeat; no position or score is sent by us
+        GameState snapshot;
+        bool updated = net_client_state(&net, &snapshot);
+        if (!net_client_send(&net, direction))
+        {
+            atomic_store(&worker_status, 1);
+            atomic_store(&running, false);
+        }
+	
+        pthread_mutex_lock(&mutex);
+        int_player_id = net.player_id;
+	
+        if (updated)
+        {
+            // Replace the entire display state; copying only active players
+            // would leave a disconnected player's old square visible forever
+            game_state = snapshot;
+            for (int i = 0; i < MAX_PLAYERS; ++i)
+            {
+                arr_Players[i] = (Player){snapshot.players[i].active,
+                    snapshot.players[i].x, snapshot.players[i].y,
+                    snapshot.players[i].score};
+            }
+        }
+	
+        if (int_player_id == -1)
+        {
+            // A timeout invalidates the assignment; clear stale data instead of
+            // making a disconnected client look as if it is still in the round
+            memset(arr_Players, 0, sizeof(arr_Players));
+            memset(&game_state, 0, sizeof(game_state));
+        }
+        pthread_mutex_unlock(&mutex);
+	
+        dds_sleepfor(DDS_MSECS(1));
+    }
+
+    // Try a reliable leave before deleting DDS; if the window/process disappears
+    // without this path, the server's heartbeat timeout still releases the slot
+    net_close(&net);
+    return NULL;
+}
+
 int main(void)
 {
 	pthread_t thread;
 
-    if (pthread_create(&thread, NULL, worker, NULL) != 0)
+    if (pthread_create(&thread, NULL, legacy_worker, NULL) != 0)
     {
         perror("pthread_create");
         return 1;
@@ -412,7 +490,7 @@ int main(void)
 		char str_banner[100] = "Waiting for server ...";
 		pthread_mutex_lock(&mutex);
 
-		// Copy the player ID while the worker cannot change it
+		// Copy the player ID while the legacy_worker cannot change it
 		int display_player_id = int_player_id;
 		pthread_mutex_unlock(&mutex);
 
