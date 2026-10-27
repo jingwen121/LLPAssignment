@@ -2,18 +2,22 @@
 set -euo pipefail
 umask 077
 
-# Create a new directory so an existing set of keys is never overwritten
+# Refuse an existing path, including a symlink; mkdir without -p also closes the
+# race where 2 invocations both pass the existence check and overwrite keys
 output=${1:-credentials}
 if [[ -e "$output" ]]; then
     echo "Directory already exists: $output" >&2
     exit 1
 fi
-mkdir -p "$output"
+mkdir -- "$output"
 output=$(cd "$output" && pwd)
 mkdir "$output/authority"
 
-# Keep this key on the server administrator's machine
+# This is the trust root for this game's identities and policy signatures
+# Keep its private key with the administrator; clients receive only ca.pem
 openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365 \
+    -addext 'basicConstraints=critical,CA:TRUE' \
+    -addext 'keyUsage=critical,digitalSignature,keyCertSign,cRLSign' \
     -subj '/CN=CoinRushCA' -keyout "$output/authority/ca.key" \
     -out "$output/authority/ca.pem" 2>/dev/null
 
@@ -39,13 +43,15 @@ cat > "$output/authority/governance.xml" <<'XML'
 </domain_rule></domain_access_rules></dds>
 XML
 
-# Sign the policy so a client cannot edit its own permissions
+# The governance signature protects the encryption requirements; permissions
+# below are signed separately so editing allowed topics invalidates the signature
 openssl smime -sign -text -md sha256 \
     -in "$output/authority/governance.xml" \
     -signer "$output/authority/ca.pem" -inkey "$output/authority/ca.key" \
     -out "$output/authority/governance.p7s"
 
-# The sixth client is available for the server-full test
+# Issue a separate identity for each client; sharing a directory shares its key
+# The sixth client is available for the server-full test, not a sixth game slot
 for role in server client1 client2 client3 client4 client5 client6; do
     mkdir "$output/$role"
     openssl req -new -newkey rsa:2048 -nodes -sha256 \
@@ -59,6 +65,8 @@ for role in server client1 client2 client3 client4 client5 client6; do
         -extfile "$output/authority/identity.ext" \
         -out "$output/$role/identity.pem" 2>/dev/null
 
+    # Client code cannot grant itself a GameState writer; Cyclone checks the
+    # signed grant before creating that endpoint; unknown topics default to DENY
     publish='<topic>JoinRequest</topic><topic>Input</topic>'
     subscribe='<topic>JoinResponse</topic><topic>GameState</topic>'
     if [[ "$role" == server ]]; then
@@ -69,6 +77,8 @@ for role in server client1 client2 client3 client4 client5 client6; do
     # Use the exact certificate subject when granting access to each identity
     subject=$(openssl x509 -in "$output/$role/identity.pem" -noout -subject -nameopt RFC2253)
     subject=${subject#subject=}
+    # A small validity overlap tolerates setup clock differences; all machines
+    # still need sensible clocks because certificate expiry is checked by DDS
     start=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%S)
     finish=$(date -u -d '364 days' +%Y-%m-%dT%H:%M:%S)
     cat > "$output/authority/$role.xml" <<XML
