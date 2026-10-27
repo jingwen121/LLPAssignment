@@ -23,7 +23,6 @@
 
 #define STB_EASY_FONT_IMPLEMENTATION
 
-#define MAX_SAMPLES 1
 #define MAX_PLAYERS 5
 
 
@@ -88,117 +87,6 @@ void draw_text(float x, float y, float scale, const char *text)
 
     glPopMatrix();
 }
-
-void *legacy_worker(void *arg)
-{
-
-    // This worker does not use the argument passed by pthread_create
-    (void)arg;
-
-	dds_entity_t participant;
-	dds_entity_t join_topic;
-	dds_entity_t response_topic;
-	dds_entity_t input_topic;
-	dds_entity_t position_topic;
-	dds_entity_t response_reader;
-	dds_entity_t position_reader;
-	dds_entity_t join_writer;
-	dds_entity_t input_writer;
-	
-	//Pointer to unknown type
-	void *samples_response[MAX_SAMPLES];
-	dds_sample_info_t infos_response[MAX_SAMPLES];
-	void *samples_position[MAX_SAMPLES];
-	dds_sample_info_t infos_position[MAX_SAMPLES];
-	dds_return_t rc;
-	
-	/* ----------------------------------------------------- */
-    /* Create participant                                    */
-    /* ----------------------------------------------------- */
-
-    participant = dds_create_participant
-	(
-        DDS_DOMAIN_DEFAULT,
-        NULL,
-        NULL
-    );
-
-    if (participant < 0)
-    {
-        printf("Failed to create participant\n");
-
-        // Stop the program if the DDS participant could not be created
-        exit(EXIT_FAILURE);
-    }
-
-    /* ----------------------------------------------------- */
-    /* Create topics                                          */
-    /* ----------------------------------------------------- */
-
-    join_topic = dds_create_topic
-	(
-        participant,
-        &JoinRequest_desc,
-        "JoinRequest",
-        NULL,
-        NULL
-    );
-	
-	response_topic = dds_create_topic
-	(
-        participant,
-        &JoinResponse_desc,
-        "JoinResponse",
-        NULL,
-        NULL
-    );
-	
-	input_topic = dds_create_topic
-	(
-        participant,
-        &Input_desc,
-        "Input",
-        NULL,
-        NULL
-    );
-	
-	position_topic = dds_create_topic
-	(
-        participant,
-        &Position_desc,
-        "Position",
-        NULL,
-        NULL
-    );
-	
-	/* ----------------------------------------------------- */
-    /* Create writers                                         */
-    /* ----------------------------------------------------- */
-
-    join_writer = dds_create_writer(
-        participant,
-        join_topic,
-        NULL,
-        NULL
-    );
-	
-	input_writer = dds_create_writer(
-        participant,
-        input_topic,
-        NULL,
-        NULL
-    );
-	
-	/* ----------------------------------------------------- */
-    /* Create readers                                         */
-    /* ----------------------------------------------------- */
-
-    response_reader = dds_create_reader(
-        participant,
-        response_topic,
-        NULL,
-        NULL
-    );}
 
 void *worker(void *arg)
 {
