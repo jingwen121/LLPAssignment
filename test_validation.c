@@ -355,3 +355,153 @@ static int compare_time(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--plain") == 0)
+    {
+        // Deliberately bypass net_open to model a participant that omits DDS
+        // Security entirely; A secure server must never match its join writer
+        dds_entity_t participant = dds_create_participant(NET_DOMAIN, NULL, NULL);
+        CHECK(participant > 0);
+        dds_entity_t topic = dds_create_topic(participant, &JoinRequest_desc,
+                                             "JoinRequest", NULL, NULL);
+        CHECK(topic > 0);
+
+        // Match the real server's requested reliability; a QoS mismatch must
+        // not be mistaken for evidence that authentication rejected this peer
+        dds_qos_t *qos = dds_create_qos();
+        CHECK(qos != NULL);
+        dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_MSECS(100));
+        dds_entity_t writer = dds_create_writer(participant, topic, qos, NULL);
+        dds_delete_qos(qos);
+        CHECK(writer > 0);
+        dds_guid_t guid;
+        CHECK(dds_get_guid(participant, &guid) == DDS_RETCODE_OK);
+        JoinRequest request;
+        memcpy(request.client_id, guid.v, sizeof(request.client_id));
+
+        // Repeated writes give discovery time to finish; any reader match is
+        // a failure because this participant supplied no security credentials
+        for (int i = 0; i < 30; ++i)
+        {
+            CHECK(dds_write(writer, &request) == DDS_RETCODE_OK);
+            dds_publication_matched_status_t status;
+            CHECK(dds_get_publication_matched_status(writer, &status) == DDS_RETCODE_OK);
+            CHECK(status.current_count == 0);
+            dds_sleepfor(DDS_MSECS(100));
+        }
+        CHECK(dds_delete(participant) == DDS_RETCODE_OK);
+        puts("PASS unauthenticated plaintext participant has no matched server reader");
+        return 0;
+    }
+
+    if (argc == 3 && (strcmp(argv[1], "--probe") == 0 || strcmp(argv[1], "--link") == 0))
+    {
+        // Use a real client process when checking admission to the game server
+        Network net;
+        if (!net_open(&net, false, argv[2]))
+            return 1;
+
+        GameState snapshot;
+        bool link_test = strcmp(argv[1], "--link") == 0;
+
+        // Probe mode only needs admission plus 1 valid snapshot; link mode
+        // stays active for 8 seconds to observe delivery under impairment
+        uint64_t gaps = 0;
+        uint64_t previous = 0;
+        int64_t last_received = 0;
+        int64_t intervals[512];
+        int interval_count = 0;
+        int64_t deadline = net_now() + (link_test ? INT64_C(8000000000) : INT64_C(5000000000));
+        while (net_now() < deadline && (link_test || net.received == 0))
+        {
+            if (net_client_state(&net, &snapshot))
+            {
+                int64_t received = net_now();
+                if (last_received && interval_count < 512)
+                    intervals[interval_count++] = received - last_received;
+                last_received = received;
+
+                // Count only gaps after the first received snapshot; sequences
+                // published before admission are not losses experienced by us
+                if (previous && snapshot.seq > previous + 1)
+                    gaps += snapshot.seq - previous - 1;
+                previous = snapshot.seq;
+            }
+            CHECK(net_client_send(&net, link_test ? 'r' : 'n'));
+            dds_sleepfor(DDS_MSECS(1));
+        }
+
+        // An admission alone does not prove communication works in both
+        // directions; even the short probe must receive a validated snapshot
+        // Exit 1 means startup failed; exit 2 means no usable connection within
+        // the test window; the external checks expect these for rejected peers
+        int result = net.player_id > 0 && net.received >= (link_test ? 30u : 1u) ? 0 : 2;
+        printf("Client player ID: %d, snapshots: %llu, gaps: %llu\n", net.player_id,
+               (unsigned long long)net.received, (unsigned long long)gaps);
+
+        // These are arrival intervals, not one-way network latency; they need
+        // no clock synchronisation and are also useful on separate computers
+        if (interval_count > 0)
+        {
+            int64_t total = 0;
+            for (int i = 0; i < interval_count; ++i)
+                total += intervals[i];
+            qsort(intervals, (size_t)interval_count, sizeof(intervals[0]), compare_time);
+            printf("SNAPSHOT intervals: mean %.3f ms, p95 %.3f ms, max %.3f ms\n",
+                   total / (interval_count * 1e6),
+                   intervals[(interval_count * 95 + 99) / 100 - 1] / 1e6,
+                   intervals[interval_count - 1] / 1e6);
+        }
+        net_close(&net);
+        return result;
+    }
+
+    const char *root = argc > 1 ? argv[1] : "credentials";
+
+    // Ordinary globals become private copies after fork; MAP_SHARED keeps the
+    // command/report area visible to every process without sharing DDS handles
+    shared = mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE,
+                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(shared != MAP_FAILED);
+    memset(shared, 0, sizeof(*shared));
+    for (int i = 0; i < 6; ++i)
+        atomic_store(&shared->clients[i].player_id, -1);
+
+    // Register cleanup before the first fork so partial startup failures do not
+    // leave running participants behind; DDS threads are created only in children
+    parent_pid = getpid();
+    atexit(cleanup);
+    fflush(NULL);
+    for (int i = 0; i < 7; ++i)
+    {
+        children[i] = fork();
+        CHECK(children[i] >= 0);
+        if (children[i] == 0)
+        {
+            if (i == 0)
+                test_server(root);
+            else
+                test_client(root, i - 1);
+        }
+    }
+
+    // Admit 2 clients together; distinct IDs and actual payload checks prove
+    // the replies were routed correctly and state travelled back to both clients
+    atomic_store(&shared->clients[0].start, true);
+    atomic_store(&shared->clients[1].start, true);
+    wait_ms(2500);
+    CHECK(atomic_load(&shared->server_ready) == 1);
+    CHECK(atomic_load(&shared->joins) == 2 && player_id(0) > 0 && player_id(1) > 0);
+    CHECK(player_id(0) != player_id(1));
+    CHECK(atomic_load(&shared->clients[0].updates) > 0);
+    CHECK(atomic_load(&shared->clients[1].updates) > 0);
+    CHECK(atomic_load(&shared->clients[0].payload_checks) > 0);
+    puts("PASS simultaneous joins and complete snapshots");
+
+    // Repeated admission requests must return the existing assignment rather
+    // than consume 3 more slots; the cumulative join count must stay at 2
+    for (int i = 0; i < 3; ++i)
+        command(0, RETRY_JOIN, 0, 0);
+    wait_ms(100);}
+
