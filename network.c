@@ -137,6 +137,157 @@ fail:
     return false;
 }
 
+static bool sender(dds_entity_t reader, const dds_sample_info_t *info, dds_guid_t *id)
+{
+    // Get the sender from DDS metadata instead of trusting an ID in the message
+    dds_builtintopic_endpoint_t *data =
+        dds_get_matched_publication_data(reader, info->publication_handle);
+    if (!data)
+        return false;
+
+    *id = data->participant_key;
+    dds_builtintopic_free_endpoint(data);
+    return true;
+}
+
+static bool take(dds_entity_t reader, void *sample, dds_sample_info_t *info)
+{
+    // Supply storage because these IDL types contain only fixed-size fields
+    // DDS disposal notifications have no payload; never interpret them as input
+    void *samples[] = {sample};
+    dds_return_t count = dds_take(reader, samples, info, 1, 1);
+    if (count < 0)
+        checked(count, "Read DDS sample");
+    return count == 1 && info->valid_data;
+}
+
+bool net_server_accept(Network *net, int player_id)
+{
+    if (player_id < 0 || player_id > NET_PLAYERS)
+        return false;
+
+    // A numeric player ID is reused after a disconnect; bind the new admission to
+    // both its DDS sender and a random token; otherwise a delayed old input from
+    // the same participant could become valid again when it rejoins that slot
+    if (player_id != 0)
+    {
+        NetSession *session = &net->sessions[player_id - 1];
+        if (session->active)
+            return false;
+
+        uint64_t token;
+        ssize_t bytes;
+        do
+        {
+            bytes = getrandom(&token, sizeof(token), 0);
+        } while (bytes < 0 && errno == EINTR);
+
+        // Never fall back to rand or a clock value for an admission token
+        if (bytes != sizeof(token) || token == 0)
+        {
+            fprintf(stderr, "Cannot generate session token\n");
+            return false;
+        }
+
+        *session = (NetSession){.active = true, .owner = net->pending_id,
+                               .session_id = token, .last_seen = net_now()};
+    }
+
+    JoinResponse response = {.int_player_id = player_id};
+    if (player_id > 0)
+        response.session_id = net->sessions[player_id - 1].session_id;
+    memcpy(response.client_id, net->pending_id.v, sizeof(response.client_id));
+    return checked(dds_write(net->response, &response), "Send join reply");
+}
+
+NetEvent net_server_poll(Network *net)
+{
+    int64_t now = net_now();
+
+    // Release 1 timed-out slot and let the game remove the player
+    for (int i = 0; i < NET_PLAYERS; ++i)
+    {
+        if (net->sessions[i].active && now - net->sessions[i].last_seen >= NET_TIMEOUT_NS)
+        {
+            net->sessions[i].active = false;
+            return (NetEvent){NET_LEAVE, i + 1, 'q'};
+        }
+    }
+
+    Input input;
+    dds_sample_info_t info;
+    dds_guid_t owner;
+
+    if (take(net->input, &input, &info))
+    {
+        ++net->received;
+        bool valid = input.int_player_id >= 1 && input.int_player_id <= NET_PLAYERS &&
+            strchr("lrnq", input.ch_direction) != NULL && input.ch_direction != '\0';
+        NetSession *session = valid ? &net->sessions[input.int_player_id - 1] : NULL;
+
+        // Check bounds before indexing; A claimed ID alone proves nothing; use
+        // authenticated DDS metadata, the current admission token and a strictly
+        // increasing sequence before changing any session timestamp
+        if (!valid || !session->active || !sender(net->input, &info, &owner) ||
+            !same_id(&owner, &session->owner) || input.session_id != session->session_id ||
+            input.seq <= session->seq)
+            ++net->rejected;
+        else
+        {
+            // Consume the sequence even when movement is rate limited; replaying
+            // that rejected movement later must not make it acceptable
+            session->seq = input.seq;
+            session->last_seen = now;
+
+            if (input.ch_direction == 'q')
+            {
+                session->active = false;
+                return (NetEvent){NET_LEAVE, input.int_player_id, 'q'};
+            }
+
+            // Accept at most 1 movement every 10 ms regardless of send rate
+            if (input.ch_direction != 'n')
+            {
+                if (now - session->last_move >= NET_INPUT_NS)
+                {
+                    session->last_move = now;
+                    return (NetEvent){NET_MOVE, input.int_player_id, input.ch_direction};
+                }
+                ++net->rejected;
+            }
+        }
+    }
+
+    JoinRequest request;
+    if (take(net->join, &request, &info))
+    {
+        // Check that the requested client ID belongs to the actual sender
+        if (!sender(net->join, &info, &owner) ||
+            memcmp(request.client_id, owner.v, sizeof(request.client_id)) != 0)
+        {
+            ++net->rejected;
+            return (NetEvent){0};
+        }
+
+        net->pending_id = owner;
+        for (int i = 0; i < NET_PLAYERS; ++i)
+        {
+            if (net->sessions[i].active && same_id(&owner, &net->sessions[i].owner))
+            {
+                // Reply with the existing slot when the same client retries
+                JoinResponse response = {.int_player_id = i + 1,
+                    .session_id = net->sessions[i].session_id};
+                memcpy(response.client_id, owner.v, sizeof(response.client_id));
+                checked(dds_write(net->response, &response), "Resend join reply");
+                return (NetEvent){0};
+            }
+        }
+        return (NetEvent){NET_JOIN, 0, 0};
+    }
+
+    return (NetEvent){0};
+}
+
     net_close(net);
     return false;
 }
