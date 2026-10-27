@@ -1,10 +1,10 @@
-/* gcc -o server server.c messages.c $(pkg-config --cflags --libs CycloneDDS) */
+// Build with make and run ./build/server credentials/server
 
 /* Dr Khoo Teck Ping
 27 Aug 2026
 1. DDS server
 2. Supports max 5 clients
-3. Start this server, then start client one by one
+3. Start this server before starting the clients
 4. Each client can see itself and all other clients
 5. Each client can move itself using the arrow keys
 6. Collision detection among all players and the window is supported */
@@ -18,19 +18,21 @@ watch out for break out of loop */
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include "network.h"
 
 #include "dds/dds.h"
 #include "messages.h"
 
 // ### GLOBAL CONSTANTS ###
-/* An array of one message (aka sample in dds terms) will be used. */
 #define MAX_SAMPLES 1
 #define MAX_PLAYERS 5
 
 #define WIDTH  800
 #define HEIGHT 600
 #define SQ_WIDTH 50
-// How many pixels is one step
+// How many pixels is 1 step
 #define STEP 1
 
 // Player coord defined as NW corner of square
@@ -39,6 +41,7 @@ typedef struct
     bool b_active;
     int x;
     int y;
+    int score;
 } Player;
 
 // ### GLOBAL VARIABLES ###
@@ -58,6 +61,26 @@ int int_new_player_id = -1;
 // Init all members to 0
 static Player arr_Players[MAX_PLAYERS] = {0};
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// The main thread owns slot allocation; A condition variable lets the worker
+// sleep while waiting for that decision; it releases mutex during the wait
+static pthread_cond_t join_ready = PTHREAD_COND_INITIALIZER;
+
+// These flags cross thread boundaries outside mutex; A failed secure startup
+// must stop main as well, otherwise the program would appear to run without DDS
+static atomic_bool running = true;
+static atomic_int worker_status = 0;
+
+// Update round fields and coins under mutex; networking
+// copies this state but never invents coins, scores, round timing or a winner
+static GameState round_state;
+
+static void stop_server(int signal_number)
+{
+    (void)signal_number;
+    atomic_store(&running, false);
+}
+
 
 // Check if the coords collide with other squares
 bool detect_collision(Player a_arr_players[], int a_int_arr_len, 
@@ -89,7 +112,7 @@ bool detect_collision(Player a_arr_players[], int a_int_arr_len,
 	return b_res;
 }
 
-void *worker(void *arg)
+void *legacy_worker(void *arg)
 {
 
     // This worker does not use the argument passed by pthread_create
@@ -396,6 +419,124 @@ void *worker(void *arg)
 	}
 }
 
+void *worker(void *arg)
+{
+    Network net;
+
+    // Use the server certificate directory passed in by main
+    if (!net_open(&net, true, arg))
+    {
+        atomic_store(&worker_status, 1);
+        atomic_store(&running, false);
+        return NULL;
+    }
+
+    int64_t last_state = 0;
+    while (atomic_load(&running))
+    {
+        // Limit work per pass so joins and movement cannot indefinitely postpone
+        // the next snapshot; heartbeats may return NET_NONE after being consumed;
+        // another pass follows after the short sleep below
+        for (int count = 0; count < 32; ++count)
+        {
+            NetEvent event = net_server_poll(&net);
+            if (event.type == NET_NONE)
+                break;
+
+            if (event.type == NET_JOIN)
+            {
+                // Ask the main thread to choose a player slot and spawn position
+                pthread_mutex_lock(&mutex);
+                int_new_player_id = -1;
+                b_player_join = true;
+	
+                // Recheck the condition after waking; condition variables may
+                // wake without a reply; checking running also allows shutdown
+                while (int_new_player_id == -1 && atomic_load(&running))
+                    pthread_cond_wait(&join_ready, &mutex);
+	
+                int assigned_id = int_new_player_id;
+                pthread_mutex_unlock(&mutex);
+	
+                if (assigned_id >= 0 && !net_server_accept(&net, assigned_id))
+                {
+                    atomic_store(&worker_status, 1);
+                    atomic_store(&running, false);
+                }
+            }
+            else if (event.type == NET_LEAVE)
+            {
+                // Clear all fields so a new owner never inherits another score
+                // The game uses the active count to apply its mid-round leave rule;
+                // this connection handler deliberately does not end the round
+                pthread_mutex_lock(&mutex);
+                if (arr_Players[event.player_id - 1].b_active)
+                {
+                    arr_Players[event.player_id - 1] = (Player){0};
+                    --int_num_active_players;
+                }
+                pthread_mutex_unlock(&mutex);
+            }
+            else if (event.type == NET_MOVE)
+            {
+                // The networking code has already checked the sender and input rate
+                pthread_mutex_lock(&mutex);
+                Player *player = &arr_Players[event.player_id - 1];
+                int x = player->x;
+                int y = player->y;
+
+                switch (event.direction)
+                {
+                    case 'l': x -= STEP; break;
+                    case 'r': x += STEP; break;
+                }
+	
+                // Keep the existing server movement and collision checks
+                if (player->b_active && x >= 0 && x <= WIDTH - SQ_WIDTH &&
+                    y >= 0 && y <= HEIGHT - SQ_WIDTH &&
+                    !detect_collision(arr_Players, MAX_PLAYERS, event.player_id, x, y))
+                {
+                    player->x = x;
+                    player->y = y;
+                }
+                pthread_mutex_unlock(&mutex);
+            }
+        }
+	
+        // Copy players and round fields in 1 critical section; mixing 2
+        // different ticks could show a score with the wrong player positions
+        // DDS writes happen after unlocking because reliable operations can wait
+        int64_t now = net_now();
+        if (now - last_state >= INT64_C(50000000))
+        {
+            GameState snapshot;
+            pthread_mutex_lock(&mutex);
+            snapshot = round_state;
+            for (int i = 0; i < MAX_PLAYERS; ++i)
+            {
+                snapshot.players[i] = (PlayerState){arr_Players[i].b_active,
+                    arr_Players[i].x, arr_Players[i].y, arr_Players[i].score};
+            }
+            pthread_mutex_unlock(&mutex);
+
+            if (!net_server_state(&net, &snapshot))
+            {
+                atomic_store(&worker_status, 1);
+                atomic_store(&running, false);
+            }
+			
+            last_state = now;
+        }
+			
+        // A 1 ms polling interval bounds idle work without tying networking to
+        // rendering; snapshots have their own 50 ms schedule, which is 20 Hz
+        dds_sleepfor(DDS_MSECS(1));
+    }
+						
+    net_close(&net);
+    return NULL;
+}
+
 int main(void)
 {
 	// Seed rand(), so that the random numbers are different for each run
@@ -403,7 +544,7 @@ int main(void)
 	
 	pthread_t thread;
 
-    if (pthread_create(&thread, NULL, worker, NULL) != 0)
+    if (pthread_create(&thread, NULL, legacy_worker, NULL) != 0)
     {
         perror("pthread_create");
         return 1;
