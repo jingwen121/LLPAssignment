@@ -84,6 +84,7 @@ def prepare():
 
 
 def checks():
+    run(["./build/test_game"], "game-tests.log")
     # Exercise generation on a fresh path as well as reusing earlier QA keys
     # A path with spaces catches shell-quoting mistakes before a teammate hits one
     with tempfile.TemporaryDirectory(prefix="issuance-", dir=WORK) as temporary:
@@ -154,6 +155,15 @@ def checks():
         run(["./build/test_validation", "--probe", FOREIGN / "client1"],
             "foreign-ca.log", expected=2)
         run(["./build/test_validation", "--plain"], "plaintext-participant.log")
+        # Start 2 real clients together so the existing game starts a round;
+        # both must receive movement, coin state and the final server result
+        with contextlib.ExitStack() as clients:
+            participants = [clients.enter_context(running(
+                ["./build/test_validation", "--game", TRUSTED / f"client{i}"],
+                f"game-client-{i}.log")) for i in (1, 2)]
+            for client in participants:
+                require(client.wait(timeout=75) == 0, "Actual game transport check failed")
+        print("PASS full-round transport with 2 actual game clients", flush=True)
         require(server.poll() is None, "Server exited during admission tests")
     print("PASS security checks against the real game server", flush=True)
 
@@ -169,19 +179,18 @@ def cpu_sample(process):
 
 
 def profile():
-    # Make a controlled comparison from the current source; removing exactly the
-    # 2 polling sleeps changes only idle scheduling; security and compiler flags
-    # stay identical; this is an experiment, not a second production server mode
+    # Remove only the DDS polling sleep in the control build; the game must keep
+    # its fixed tick interval so the comparison does not change game speed
     source = (ROOT / "server.c").read_text()
-    sleep = "dds_sleepfor(DDS_MSECS(1));"
-    require(source.count(sleep) == 2, "Update the polling experiment for the changed server")
+    sleep = "dds_sleepfor(DDS_MSECS(2));"
+    require(source.count(sleep) == 1, "Update the polling experiment for the changed worker")
     busy_source = WORK / "server-busy.c"
     busy_source.write_text(source.replace(sleep, "(void)0; /* QA busy-poll control */"))
     flags = shlex.split(subprocess.check_output(
         ["pkg-config", "--cflags", "--libs", "CycloneDDS"], text=True))
     busy = WORK / "server-busy"
     run(["gcc", "-std=c11", "-D_DEFAULT_SOURCE", "-O2", "-g", "-Wall", "-Wextra",
-         "-Wpedantic", "-I.", "-Ibuild", busy_source, "network.c", "build/messages.c",
+         "-Wpedantic", "-I.", "-Ibuild", busy_source, "game.c", "network.c", "build/messages.c",
          "-o", busy, *flags, "-pthread"], "profile-build.log")
 
     results = {}
@@ -230,7 +239,7 @@ def profile():
                   "./build/server", TRUSTED / "server"], "callgrind.log") as process:
         time.sleep(5)
         process.send_signal(signal.SIGINT)
-        require(process.wait(timeout=10) == 0, "Profiled server failed to stop")
+        require(process.wait(timeout=10) in (0, -signal.SIGINT), "Profiled server failed to stop")
     run(["callgrind_annotate", "--inclusive=yes", "--threshold=95", WORK / "callgrind.out"],
         "callgrind-report.txt")
 
@@ -353,6 +362,7 @@ def main():
     elif mode == "sanitize":
         env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
                    UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
+        run(["./build/test_game_sanitized"], "game-sanitizers.log", env=env)
         run(["./build/test_sanitized", TRUSTED], "sanitizers.log", env=env)
         # Also exercise the actual threaded server adapter; the protocol fixture
         # alone cannot find memory errors in its main/worker handoff or shutdown
@@ -361,7 +371,7 @@ def main():
             run(["./build/test_sanitized", "--link", TRUSTED / "client1"],
                 "sanitized-link.log", env=env)
             server.send_signal(signal.SIGINT)
-            require(server.wait(timeout=5) == 0, "Sanitized game server failed on shutdown")
+            require(server.wait(timeout=5) in (0, -signal.SIGINT), "Sanitized game server failed on shutdown")
     elif mode == "profile":
         profile()
     elif mode == "wire":

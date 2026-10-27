@@ -101,7 +101,7 @@ static void test_server(const char *root)
     // This checks transport of game-state fields, not coin spawning or winner logic
     GameState state = {.state = 1, .remaining_ms = 60000};
     for (int i = 0; i < NET_COINS; ++i)
-        state.coins[i] = (CoinState){true, i * 160, -i * 100, i == 0};
+        state.coins[i] = (CoinState){true, i * (800 / NET_COINS), -i * 60, i == 0};
     int64_t last_snapshot = 0;
     atomic_store(&shared->server_ready, 1);
 
@@ -173,8 +173,8 @@ static void test_server(const char *root)
                 case 11: bad.winner_id = 6; break;
                 case 12: bad.coins[0].x = -1; break;
                 case 13: bad.coins[0].x = 801; break;
-                case 14: bad.coins[0].y = -601; break;
-                case 15: bad.coins[0].y = 601; break;
+                case 14: bad.coins[0].y = -621; break;
+                case 15: bad.coins[0].y = 621; break;
             }
 
             // Kind 16 deliberately bypasses net_server_state so the sequence is
@@ -231,8 +231,8 @@ static void test_client(const char *root, int index)
             // deliver a sample while making coins or HUD fields unusable for the client
             CHECK(snapshot.state == 1 && snapshot.remaining_ms == 60000);
             for (int i = 0; i < NET_COINS; ++i)
-                CHECK(snapshot.coins[i].active && snapshot.coins[i].x == i * 160 &&
-                      snapshot.coins[i].y == -i * 100 && snapshot.coins[i].gold == (i == 0));
+                CHECK(snapshot.coins[i].active && snapshot.coins[i].x == i * (800 / NET_COINS) &&
+                      snapshot.coins[i].y == -i * 60 && snapshot.coins[i].gold == (i == 0));
             for (int i = 0; i < NET_PLAYERS; ++i)
                 if (snapshot.players[i].active)
                     CHECK(snapshot.players[i].score == 3);
@@ -395,7 +395,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (argc == 3 && (strcmp(argv[1], "--probe") == 0 || strcmp(argv[1], "--link") == 0))
+    if (argc == 3 && (strcmp(argv[1], "--probe") == 0 || strcmp(argv[1], "--link") == 0 ||
+                      strcmp(argv[1], "--game") == 0))
     {
         // Use a real client process when checking admission to the game server
         Network net;
@@ -403,7 +404,13 @@ int main(int argc, char **argv)
             return 1;
 
         GameState snapshot;
-        bool link_test = strcmp(argv[1], "--link") == 0;
+        bool game_test = strcmp(argv[1], "--game") == 0;
+        bool link_test = strcmp(argv[1], "--probe") != 0;
+        bool moved = false;
+        bool results = false;
+        int first_x = -1;
+        int most_coins = 0;
+        int64_t playing_at = 0;
 
         // Probe mode only needs admission plus 1 valid snapshot; link mode
         // stays active for 8 seconds to observe delivery under impairment
@@ -412,7 +419,10 @@ int main(int argc, char **argv)
         int64_t last_received = 0;
         int64_t intervals[512];
         int interval_count = 0;
-        int64_t deadline = net_now() + (link_test ? INT64_C(8000000000) : INT64_C(5000000000));
+        // The game check stays for a full round; this exercises the actual
+        // server adapter rather than the deterministic protocol fixture
+        int64_t deadline = net_now() + (game_test ? INT64_C(65000000000) :
+            link_test ? INT64_C(8000000000) : INT64_C(5000000000));
         while (net_now() < deadline && (link_test || net.received == 0))
         {
             if (net_client_state(&net, &snapshot))
@@ -427,6 +437,47 @@ int main(int argc, char **argv)
                 if (previous && snapshot.seq > previous + 1)
                     gaps += snapshot.seq - previous - 1;
                 previous = snapshot.seq;
+
+                if (game_test && net.player_id > 0)
+                {
+                    int x = snapshot.players[net.player_id - 1].x;
+                    if (first_x == -1)
+                        first_x = x;
+                    moved |= x != first_x;
+                    int coins = 0;
+                    for (int i = 0; i < NET_COINS; ++i)
+                        coins += snapshot.coins[i].active;
+                    if (coins > most_coins)
+                        most_coins = coins;
+                    if (snapshot.state == 1 && playing_at == 0)
+                        playing_at = received;
+
+                    // Check the transmitted winner against the same snapshot's
+                    // scores; ties use ID 0 and a single leader keeps its ID
+                    if (snapshot.state == 2 && !results)
+                    {
+                        CHECK(playing_at != 0);
+                        CHECK(received - playing_at >= INT64_C(59000000000));
+                        CHECK(received - playing_at <= INT64_C(62000000000));
+                        int best = -1, winner = 0, leaders = 0;
+                        for (int i = 0; i < NET_PLAYERS; ++i)
+                        {
+                            const PlayerState *player = &snapshot.players[i];
+                            if (!player->active)
+                                continue;
+                            if (player->score > best)
+                            {
+                                best = player->score;
+                                winner = i + 1;
+                                leaders = 1;
+                            }
+                            else if (player->score == best)
+                                ++leaders;
+                        }
+                        CHECK(snapshot.winner_id == (leaders == 1 ? winner : 0));
+                        results = true;
+                    }
+                }
             }
             CHECK(net_client_send(&net, link_test ? 'r' : 'n'));
             dds_sleepfor(DDS_MSECS(1));
@@ -437,6 +488,11 @@ int main(int argc, char **argv)
         // Exit 1 means startup failed; exit 2 means no usable connection within
         // the test window; the external checks expect these for rejected peers
         int result = net.player_id > 0 && net.received >= (link_test ? 30u : 1u) ? 0 : 2;
+        if (game_test)
+        {
+            CHECK(moved && results && most_coins > 0);
+            printf("PASS actual game transport: movement, %d coins and full-round results\n", most_coins);
+        }
         printf("Client player ID: %d, snapshots: %llu, gaps: %llu\n", net.player_id,
                (unsigned long long)net.received, (unsigned long long)gaps);
 

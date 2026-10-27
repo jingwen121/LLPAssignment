@@ -49,7 +49,7 @@ struct CoinState
 {
     boolean active;
 
-    // Coin centres can start above the screen; the server decides the actual spawn height
+    // Centres can extend above or below the arena by the coin's half-size
     long x;
     long y;
     boolean gold; // the server awards 3 points for gold; the client only displays this flag
@@ -68,5 +68,5 @@ struct GameState
     long winner_id;
     // Fixed arrays bound message size; no network-controlled allocation is needed
     PlayerState players[5];
-    CoinState coins[5];
+    CoinState coins[8];
 };

@@ -78,7 +78,7 @@ static dds_entity_t endpoint(Network *net, const dds_topic_descriptor_t *descrip
     return result;
 }
 
-bool net_open(Network *net, bool server, const char *credentials)
+bool net_participant(Network *net, bool server, const char *credentials)
 {
     memset(net, 0, sizeof(*net));
     net->server = server;
@@ -118,6 +118,19 @@ bool net_open(Network *net, bool server, const char *credentials)
     if (!checked(dds_get_guid(net->participant, &net->own_id), "Get participant GUID"))
         goto fail;
 
+    net->last_state = net_now();
+    return true;
+
+fail:
+    net_close(net);
+    return false;
+}
+
+bool net_open(Network *net, bool server, const char *credentials)
+{
+    if (!net_participant(net, server, credentials))
+        return false;
+
     // Joins and input use reliable delivery with a finite writer blocking time
     // Snapshots use best effort and depth 1; receiving a fresh complete state is
     // more useful than retransmitting positions that have already been replaced
@@ -129,7 +142,6 @@ bool net_open(Network *net, bool server, const char *credentials)
     if (net->join < 0 || net->response < 0 || net->input < 0 || net->state < 0)
         goto fail;
 
-    net->last_state = net_now();
     return true;
 
 fail:
@@ -200,11 +212,9 @@ bool net_server_accept(Network *net, int player_id)
     return checked(dds_write(net->response, &response), "Send join reply");
 }
 
-NetEvent net_server_poll(Network *net)
+NetEvent net_server_expire(Network *net)
 {
     int64_t now = net_now();
-
-    // Release 1 timed-out slot and let the game remove the player
     for (int i = 0; i < NET_PLAYERS; ++i)
     {
         if (net->sessions[i].active && now - net->sessions[i].last_seen >= NET_TIMEOUT_NS)
@@ -213,78 +223,93 @@ NetEvent net_server_poll(Network *net)
             return (NetEvent){NET_LEAVE, i + 1, 'q'};
         }
     }
+    return (NetEvent){0};
+}
+
+bool net_server_join(Network *net, const JoinRequest *request, const dds_sample_info_t *info)
+{
+    dds_guid_t owner;
+
+    // Validate the already-read sample so the game server can keep its DDS loop
+    // Repeated joins reply with the existing slot instead of allocating another
+    if (!info->valid_data || !sender(net->join, info, &owner) ||
+        memcmp(request->client_id, owner.v, sizeof(request->client_id)) != 0)
+    {
+        ++net->rejected;
+        return false;
+    }
+
+    net->pending_id = owner;
+    for (int i = 0; i < NET_PLAYERS; ++i)
+    {
+        if (net->sessions[i].active && same_id(&owner, &net->sessions[i].owner))
+        {
+            JoinResponse response = {.int_player_id = i + 1,
+                .session_id = net->sessions[i].session_id};
+            memcpy(response.client_id, owner.v, sizeof(response.client_id));
+            checked(dds_write(net->response, &response), "Resend join reply");
+            return false;
+        }
+    }
+    return true;
+}
+
+NetEvent net_server_input(Network *net, const Input *input, const dds_sample_info_t *info)
+{
+    int64_t now = net_now();
+    dds_guid_t owner;
+    ++net->received;
+    bool valid = info->valid_data && input->int_player_id >= 1 &&
+        input->int_player_id <= NET_PLAYERS && input->ch_direction != '\0' &&
+        strchr("lrnq", input->ch_direction) != NULL;
+    NetSession *session = valid ? &net->sessions[input->int_player_id - 1] : NULL;
+
+    // Do not index an unchecked player ID or refresh a lease for forged input
+    if (!valid || !session->active || !sender(net->input, info, &owner) ||
+        !same_id(&owner, &session->owner) || input->session_id != session->session_id ||
+        input->seq <= session->seq)
+    {
+        ++net->rejected;
+        return (NetEvent){0};
+    }
+
+    // Consume the sequence even when a movement exceeds the rate limit
+    session->seq = input->seq;
+    session->last_seen = now;
+    if (input->ch_direction == 'q')
+    {
+        session->active = false;
+        return (NetEvent){NET_LEAVE, input->int_player_id, 'q'};
+    }
+    if (input->ch_direction == 'n')
+        return (NetEvent){NET_HEARTBEAT, input->int_player_id, 'n'};
+    if (now - session->last_move >= NET_INPUT_NS)
+    {
+        session->last_move = now;
+        return (NetEvent){NET_MOVE, input->int_player_id, input->ch_direction};
+    }
+    ++net->rejected;
+    return (NetEvent){0};
+}
+
+NetEvent net_server_poll(Network *net)
+{
+    NetEvent event = net_server_expire(net);
+    if (event.type != NET_NONE)
+        return event;
 
     Input input;
     dds_sample_info_t info;
-    dds_guid_t owner;
-
     if (take(net->input, &input, &info))
     {
-        ++net->received;
-        bool valid = input.int_player_id >= 1 && input.int_player_id <= NET_PLAYERS &&
-            strchr("lrnq", input.ch_direction) != NULL && input.ch_direction != '\0';
-        NetSession *session = valid ? &net->sessions[input.int_player_id - 1] : NULL;
-
-        // Check bounds before indexing; A claimed ID alone proves nothing; use
-        // authenticated DDS metadata, the current admission token and a strictly
-        // increasing sequence before changing any session timestamp
-        if (!valid || !session->active || !sender(net->input, &info, &owner) ||
-            !same_id(&owner, &session->owner) || input.session_id != session->session_id ||
-            input.seq <= session->seq)
-            ++net->rejected;
-        else
-        {
-            // Consume the sequence even when movement is rate limited; replaying
-            // that rejected movement later must not make it acceptable
-            session->seq = input.seq;
-            session->last_seen = now;
-
-            if (input.ch_direction == 'q')
-            {
-                session->active = false;
-                return (NetEvent){NET_LEAVE, input.int_player_id, 'q'};
-            }
-
-            // Accept at most 1 movement every 10 ms regardless of send rate
-            if (input.ch_direction != 'n')
-            {
-                if (now - session->last_move >= NET_INPUT_NS)
-                {
-                    session->last_move = now;
-                    return (NetEvent){NET_MOVE, input.int_player_id, input.ch_direction};
-                }
-                ++net->rejected;
-            }
-        }
+        event = net_server_input(net, &input, &info);
+        if (event.type == NET_MOVE || event.type == NET_LEAVE)
+            return event;
     }
 
     JoinRequest request;
-    if (take(net->join, &request, &info))
-    {
-        // Check that the requested client ID belongs to the actual sender
-        if (!sender(net->join, &info, &owner) ||
-            memcmp(request.client_id, owner.v, sizeof(request.client_id)) != 0)
-        {
-            ++net->rejected;
-            return (NetEvent){0};
-        }
-
-        net->pending_id = owner;
-        for (int i = 0; i < NET_PLAYERS; ++i)
-        {
-            if (net->sessions[i].active && same_id(&owner, &net->sessions[i].owner))
-            {
-                // Reply with the existing slot when the same client retries
-                JoinResponse response = {.int_player_id = i + 1,
-                    .session_id = net->sessions[i].session_id};
-                memcpy(response.client_id, owner.v, sizeof(response.client_id));
-                checked(dds_write(net->response, &response), "Resend join reply");
-                return (NetEvent){0};
-            }
-        }
+    if (take(net->join, &request, &info) && net_server_join(net, &request, &info))
         return (NetEvent){NET_JOIN, 0, 0};
-    }
-
     return (NetEvent){0};
 }
 
@@ -348,8 +373,10 @@ static bool valid_state(const GameState *state)
 
     for (int i = 0; i < NET_COINS; ++i)
     {
+        // Spawning uses a top-left corner above the arena; after conversion,
+        // the centre can extend past either vertical edge by the coin's half-size
         if (state->coins[i].x < 0 || state->coins[i].x > 800 ||
-            state->coins[i].y < -600 || state->coins[i].y > 600)
+            state->coins[i].y < -620 || state->coins[i].y > 620)
             return false;
     }
     return true;

@@ -7,7 +7,8 @@
 #include "messages.h"
 
 #define NET_PLAYERS 5
-#define NET_COINS 5
+// Capacity covers the current game without changing how many coins it spawns
+#define NET_COINS 8
 #define NET_DOMAIN 42
 
 // These are monotonic nanoseconds; neither timeout depends on the wall clock
@@ -15,7 +16,7 @@
 #define NET_TIMEOUT_NS INT64_C(3000000000)
 #define NET_INPUT_NS INT64_C(10000000)
 
-typedef enum { NET_NONE, NET_JOIN, NET_MOVE, NET_LEAVE } NetEventType;
+typedef enum { NET_NONE, NET_JOIN, NET_MOVE, NET_LEAVE, NET_HEARTBEAT } NetEventType;
 
 typedef struct
 {
@@ -82,6 +83,8 @@ typedef struct
 // object; render/game threads exchange copies under their mutex, never DDS handles
 // net_open requires readable signed credentials; a failure must stop the worker
 bool net_open(Network *net, bool server, const char *credentials);
+// Create only the secure participant when the caller owns its existing endpoints
+bool net_participant(Network *net, bool server, const char *credentials);
 void net_close(Network *net);
 int64_t net_now(void);
 
@@ -90,6 +93,11 @@ int64_t net_now(void);
 // NET_LEAVE is emitted once for a valid leave or expired heartbeat; the server clears the
 // player and decides what that means for an in-progress round
 NetEvent net_server_poll(Network *net);
+// Apply the same checks to samples read by an existing server receive loop
+// Store its reader/writer handles in Network before calling these helpers
+NetEvent net_server_expire(Network *net);
+bool net_server_join(Network *net, const JoinRequest *request, const dds_sample_info_t *info);
+NetEvent net_server_input(Network *net, const Input *input, const dds_sample_info_t *info);
 bool net_server_accept(Network *net, int player_id);
 bool net_server_state(Network *net, GameState *state);
 
