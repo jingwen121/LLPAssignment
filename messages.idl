@@ -3,7 +3,6 @@
 
 struct JoinRequest
 {
-    boolean b_dummy;
     // This routes the reply; the server still checks the GUID against DDS metadata
     octet client_id[16];
 };
@@ -33,13 +32,6 @@ struct Input
 
     // Echo the token from JoinResponse for movement, heartbeats and leaving
     unsigned long long session_id;
-};
-
-struct Position
-{
-	long int_player_id;
-	long int_x;
-	long int_y;
 };
 
 struct PlayerState

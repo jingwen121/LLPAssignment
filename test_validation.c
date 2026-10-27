@@ -647,5 +647,111 @@ int main(int argc, char **argv)
     CHECK(atomic_load(&shared->joins) == previous_joins + 3);
 
     // Identify whichever of the 4 simultaneous clients was refused
-    int waiting = -1;}
+    int waiting = -1;
+    for (int i = 2; i < 6; ++i)
+    {
+        CHECK(atomic_load(&shared->clients[i].ready) == 1);
+        if (player_id(i) == -1)
+        {
+            CHECK(waiting == -1);
+            waiting = i;
+        }
+    }
+    CHECK(waiting >= 0);
+    puts("PASS 5-player capacity and full-server rejection");
 
+    int dropped_id = player_id(0);
+    int old_leaves = atomic_load(&shared->leaves);
+
+    // SIGKILL skips net_close completely, like a crash or powered-off machine
+    // The remaining client must take the released slot without restarting DDS
+    CHECK(kill(children[1], SIGKILL) == 0);
+    int crash_status;
+    CHECK(waitpid(children[1], &crash_status, 0) == children[1]);
+    CHECK(WIFSIGNALED(crash_status) && WTERMSIG(crash_status) == SIGKILL);
+    children[1] = 0;
+    wait_ms(3800);
+    CHECK(atomic_load(&shared->leaves) == old_leaves + 1);
+    CHECK(player_id(waiting) == dropped_id);
+    puts("PASS crashed client heartbeat timeout and slot reuse");
+
+    // Normal close sends q before deleting DDS; removal should happen well
+    // before the 3-second heartbeat timeout used by the crash test
+    old_leaves = atomic_load(&shared->leaves);
+    command(1, CLOSE, 0, 0);
+    wait_ms(400);
+    CHECK(atomic_load(&shared->leaves) == old_leaves + 1);
+    puts("PASS graceful leave");
+
+    // Stop cleanly and reap the server before measuring client timeout; keeping
+    // clients alive checks they clear old assignments without being restarted
+    atomic_store(&shared->stop_server, true);
+    int status;
+    CHECK(waitpid(children[0], &status, 0) == children[0]);
+    children[0] = 0;
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    wait_ms(3300);
+    CHECK(player_id(waiting) == -1);
+    puts("PASS server timeout clears client assignment");
+
+    // Start a new server participant and let the surviving clients join it
+    atomic_store(&shared->server_ready, 0);
+    atomic_store(&shared->stop_server, false);
+
+    // Normal exit lets sanitizer builds inspect child cleanup; flush before
+    // fork so those exits cannot print a second copy of the parent's output
+    fflush(NULL);
+    children[0] = fork();
+    CHECK(children[0] >= 0);
+    if (children[0] == 0)
+        test_server(root);
+
+    int64_t reconnect_deadline = net_now() + INT64_C(5000000000);
+    bool reconnected = false;
+    while (!reconnected && net_now() < reconnect_deadline)
+    {
+        reconnected = true;
+        for (int i = 2; i < 6; ++i)
+            if (player_id(i) < 1)
+                reconnected = false;
+        wait_ms(10);
+    }
+    CHECK(reconnected);
+
+    // Every survivor needs its own slot on the new server; this bitmask catches
+    // duplicate assignments even when all clients report a positive player ID
+    unsigned int slots = 0;
+    for (int i = 2; i < 6; ++i)
+    {
+        unsigned int bit = 1u << player_id(i);
+        CHECK((slots & bit) == 0);
+        slots |= bit;
+    }
+    puts("PASS automatic reconnect after server restart");
+
+    atomic_store(&shared->stop_server, true);
+    CHECK(waitpid(children[0], &status, 0) == children[0]);
+    children[0] = 0;
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    // Stop all client processes before opening another test participant
+    for (int i = 0; i < 6; ++i)
+    {
+        if (children[i + 1] == 0)
+            continue;
+        atomic_store(&shared->clients[i].start, true);
+        atomic_store(&shared->clients[i].stop, true);
+        CHECK(waitpid(children[i + 1], &status, 0) == children[i + 1]);
+        children[i + 1] = 0;
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+
+    // Missing keys must fail closed; there must be no automatic insecure startup
+    // Perform this after participant cleanup so it cannot interfere with discovery
+    Network missing;
+    CHECK(!net_open(&missing, false, "build/no-such-credentials"));
+    puts("PASS missing credentials rejected");
+    munmap(shared, sizeof(*shared));
+    puts("All checks passed");
+    return 0;
+}
