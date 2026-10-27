@@ -235,3 +235,110 @@ def profile():
         "callgrind-report.txt")
 
 
+def rtps_counts(data):
+    # Walk RTPS submessages by their declared lengths; searching raw ciphertext
+    # for byte patterns could mistake encrypted bytes for a plaintext message
+    secure = plain = 0
+    if not data.startswith(b"RTPS") or len(data) < 20:
+        return secure, plain
+    position = 20
+    while position + 4 <= len(data):
+        kind, flags = data[position:position + 2]
+        size = int.from_bytes(data[position + 2:position + 4],
+                              "little" if flags & 1 else "big")
+        end = position + 4 + size if size else len(data)
+        require(end <= len(data), "Truncated RTPS submessage in capture")
+        if kind in (0x30, 0x31, 0x33):
+            secure += 1
+
+        # DATA and DATA_FRAG place the writer entity kind at byte 15; builtin
+        # discovery/authentication writers have the high bits set; application
+        # writers do not; bootstrap traffic is allowed, plaintext game data is not
+        if kind in (0x15, 0x16) and end - position >= 16:
+            if data[position + 15] & 0xC0 == 0:
+                plain += 1
+        if size == 0:
+            break
+        position = end
+    return secure, plain
+
+
+def parser_check():
+    # A small synthetic check keeps the packet-evidence parser honest, including
+    # fragmented DATA and the distinction between builtin and application writers
+    header = b"RTPS" + bytes(16)
+    user = bytes((0x15, 1, 12, 0)) + bytes(12)
+    builtin = bytearray(user)
+    builtin[15] = 0xC2
+    fragment = bytes((0x16,)) + user[1:]
+    require(rtps_counts(header + user) == (0, 1), "DATA parser check failed")
+    require(rtps_counts(header + builtin) == (0, 0), "Builtin parser check failed")
+    require(rtps_counts(header + fragment) == (0, 1), "DATA_FRAG parser check failed")
+    require(rtps_counts(header + bytes((0x33, 1, 0, 0))) == (1, 0), "Secure parser check failed")
+
+
+def namespace_only():
+    # make invokes these modes through unshare; refuse the original namespace
+    # even when root; accidentally impairing the user's LAN is not acceptable
+    require(os.geteuid() == 0, "Use make wire or make loss for network privileges")
+    require(os.readlink("/proc/self/ns/net") != os.readlink("/proc/1/ns/net"),
+            "Refusing network changes outside a separate network namespace")
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+
+
+def wire():
+    namespace_only()
+    parser_check()
+    packets = secure = plain = 0
+
+    # The namespace uses IPv4 loopback only; linux exposes a 14-byte link header
+    # on this AF_PACKET socket, followed by IPv4 and UDP; no unrelated LAN traffic
+    # is captured; packets are counted rather than saving other processes' data
+    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as capture:
+        capture.bind(("lo", 0))
+        capture.settimeout(0.1)
+        with running(["./build/test_validation", TRUSTED], "wire-integration.log") as process:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                try:
+                    frame = capture.recv(65535)
+                except socket.timeout:
+                    if process.poll() is not None:
+                        break
+                    continue
+                if len(frame) < 42 or frame[12:14] != b"\x08\x00" or frame[23] != 17:
+                    continue
+                udp = 14 + (frame[14] & 15) * 4
+                data = frame[udp + 8:]
+                if not data.startswith(b"RTPS"):
+                    continue
+                packets += 1
+                protected, exposed = rtps_counts(data)
+                secure += protected > 0
+                plain += exposed
+            require(process.wait(timeout=3) == 0, "Integration tests failed during capture")
+    result = {"rtps_packets_observed": packets, "packets_with_security_submessages": secure,
+              "plaintext_user_DATA_or_DATA_FRAG": plain,
+              "note": "Loopback may expose each packet twice; counts are observations."}
+    (WORK / "wire.json").write_text(json.dumps(result, indent=2) + "\n")
+    require(secure > 100 and plain == 0, "No sufficient encrypted traffic, or plaintext game data found")
+    print(json.dumps(result, indent=2), flush=True)
+
+
+def loss():
+    namespace_only()
+    # Apply both cases to an isolated loopback device; each uses the actual game
+    # server and a client that must stay admitted and receive at least 30 states
+    for label, delay, percent in (("reference", "1ms", "0%"), ("impaired", "15ms", "10%")):
+        subprocess.run(["tc", "qdisc", "replace", "dev", "lo", "root", "netem",
+                        "delay", delay, "1ms", "loss", percent], check=True)
+        try:
+            with running(["./build/server", TRUSTED / "server"], f"loss-{label}-server.log"):
+                output = run(["./build/test_validation", "--link", TRUSTED / "client1"],
+                             f"loss-{label}-client.log", timeout=15)
+                print(output, end="", flush=True)
+                run(["tc", "-s", "qdisc", "show", "dev", "lo"], f"loss-{label}-queue.log")
+        finally:
+            subprocess.run(["tc", "qdisc", "del", "dev", "lo", "root"], check=True)
+
+
