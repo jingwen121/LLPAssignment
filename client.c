@@ -196,6 +196,29 @@ static void draw_text(float x, float y, float scale, const char *text)
     glPopMatrix();
 }
 
+// Measure the font itself so short and long labels share the same centre
+static void draw_centered(float centre, float y, float scale, const char *text)
+{
+    draw_text(centre - stb_easy_font_width((char *)text) * scale * 0.5f, y, scale, text);
+}
+
+static int window_x, window_y, window_w = ARENA_W, window_h = ARENA_H;
+
+static void toggle_fullscreen(GLFWwindow *window)
+{
+    if (glfwGetWindowMonitor(window))
+        glfwSetWindowMonitor(window, NULL, window_x, window_y, window_w, window_h, GLFW_DONT_CARE);
+    else
+    {
+        // Save the window before switching monitors; restore its position on exit
+        glfwGetWindowPos(window, &window_x, &window_y);
+        glfwGetWindowSize(window, &window_w, &window_h);
+        GLFWmonitor *monitor = glfwGetPrimaryMonitor();
+        const GLFWvidmode *mode = glfwGetVideoMode(monitor);
+        if (mode) glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+    }
+}
+
 static void draw_coin(int x, int y, int size, bool gold)
 {
     const int segments = 20;
@@ -451,12 +474,12 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
         char label[8];
         snprintf(label, sizeof(label), "P%d", i + 1);
         glColor3f(0.04f, 0.07f, 0.12f);
-        draw_text((float)x + 10.0f, (float)y + 20.0f, 1.5f, label);
+        draw_centered((float)x + 25.0f, (float)y + 20.0f, 1.5f, label);
     }
     if (my_id == i + 1)
     {
         glColor3f(0.68f, 0.91f, 1.0f);
-        draw_text((float)x + 11.0f, (float)y - 42.0f, 1.1f, "YOU");
+        draw_centered((float)x + 25.0f, (float)y - 42.0f, 1.1f, "YOU");
     }
 }
 
@@ -498,12 +521,12 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     for (int i = 0; i < MAX_PLAYERS; ++i)
         active_count += state->player_active[i] ? 1 : 0;
     char text[96];
-    glColor3f(0.88f, 0.93f, 1.0f); draw_text(250, 20, 1.6f, phase_name(state->phase));
+    glColor3f(0.88f, 0.93f, 1.0f); draw_centered(330, 20, 1.6f, phase_name(state->phase));
     glColor3f(1.0f, 0.83f, 0.42f);
-    snprintf(text, sizeof(text), "TIME  %02d", state->time_left); draw_text(476, 20, 1.8f, text);
+    snprintf(text, sizeof(text), "TIME  %02d", state->time_left); draw_centered(525, 20, 1.8f, text);
     glColor3f(0.73f, 0.81f, 0.91f);
     snprintf(text, sizeof(text), "PLAYERS  %d/%d", active_count, MAX_PLAYERS);
-    draw_text(650, 22, 1.2f, text);
+    draw_centered(710, 22, 1.2f, text);
 
     if (state->phase == 1 && g_viewport.height > 0)
     {
@@ -524,20 +547,20 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     {
         glColor3f(0.05f, 0.08f, 0.13f); draw_rect(170, 122, 460, 188);
         glColor3f(0.16f, 0.24f, 0.34f); draw_rect(170, 122, 460, 3);
-        glColor3f(0.92f, 0.96f, 1); draw_text(237, 151, 2.1f, "ROOM LOBBY");
+        glColor3f(0.92f, 0.96f, 1); draw_centered(ARENA_W * 0.5f, 151, 2.1f, "ROOM LOBBY");
         glColor3f(0.67f, 0.77f, 0.89f);
         snprintf(text, sizeof(text), "%d / 2 PLAYERS - WAITING TO START", active_count);
-        draw_text(218, 194, 1.25f, text);
+        draw_centered(ARENA_W * 0.5f, 194, 1.25f, text);
         glColor3f(1, 0.83f, 0.42f);
-        snprintf(text, sizeof(text), "ROOM CODE  %06u", room_code); draw_text(252, 233, 1.65f, text);
+        snprintf(text, sizeof(text), "ROOM CODE  %06u", room_code); draw_centered(ARENA_W * 0.5f, 233, 1.65f, text);
         glColor3f(0.57f, 0.68f, 0.81f);
-        draw_text(234, 274, 1.05f, "Share this code with friends to fill the room");
+        draw_centered(ARENA_W * 0.5f, 274, 1.05f, "Share this code with friends to fill the room");
     }
     else if (state->phase == 2)
     {
         glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, 160, 500, 232);
         glColor3f(0.99f, 0.73f, 0.27f); draw_rect(150, 160, 500, 3);
-        glColor3f(0.99f, 0.83f, 0.39f); draw_text(237, 193, 2.2f, "ROUND COMPLETE");
+        glColor3f(0.99f, 0.83f, 0.39f); draw_centered(ARENA_W * 0.5f, 193, 2.2f, "ROUND COMPLETE");
         char winners[96] = ""; size_t used = 0;
         for (int i = 0; i < MAX_PLAYERS; ++i)
             if ((state->winners & (1 << i)) != 0)
@@ -547,14 +570,14 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
                 if (n > 0 && (size_t)n < sizeof(winners) - used) used += (size_t)n;
             }
         if (!used) snprintf(winners, sizeof(winners), "No winner");
-        glColor3f(0.91f, 0.95f, 1); draw_text(218, 239, 1.8f, "WINNER");
-        draw_text(360, 239, 1.8f, winners);
+        glColor3f(0.91f, 0.95f, 1); draw_centered(ARENA_W * 0.5f, 225, 1.4f, "WINNER");
+        draw_centered(ARENA_W * 0.5f, 252, 1.8f, winners);
         glColor3f(0.67f, 0.77f, 0.89f);
         snprintf(text, sizeof(text), "TOP SCORE  %d PTS", state->best_score);
-        draw_text(292, 283, 1.4f, text);
+        draw_centered(ARENA_W * 0.5f, 283, 1.4f, text);
         glColor3f(0.45f, 0.58f, 0.73f);
         snprintf(text, sizeof(text), "NEXT ROUND IN %d", state->time_left);
-        draw_text(306, 335, 1.15f, text);
+        draw_centered(ARENA_W * 0.5f, 335, 1.15f, text);
     }
 
     for (int i = 0; i < MAX_PLAYERS; ++i)
@@ -564,7 +587,7 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
                      player_id == i + 1 ? "  YOU" : "");
             glColor3f(player_id == i + 1 ? 0.61f : 0.75f,
                       player_id == i + 1 ? 0.89f : 0.82f, 0.97f);
-            draw_text(24.0f + (float)i * 148.0f, (float)ARENA_H - 22.0f, 1.15f, text);
+            draw_centered(((float)i + 0.5f) * ARENA_W / MAX_PLAYERS, (float)ARENA_H - 22.0f, 1.15f, text);
         }
 }
 
@@ -580,8 +603,9 @@ static void draw_button(float x, float y, float w, float h, const char *label, b
     glColor3f(hovered ? 0.36f : 0.23f, hovered ? 0.86f : 0.65f, hovered ? 0.88f : 0.75f);
     draw_rect(x, y, w, 2.0f);
     glColor3f(0.91f, 0.96f, 1.0f);
-    float text_width = (float)strlen(label) * 8.0f * 1.15f;
-    draw_text(x + (w - text_width) * 0.5f, y + (h - 13.0f) * 0.5f, 1.15f, label);
+    // Match both axes to the actual font dimensions, including scaled labels
+    float text_height = stb_easy_font_height((char *)label) * 1.15f;
+    draw_centered(x + w * 0.5f, y + (h - text_height) * 0.5f, 1.15f, label);
 }
 
 static void draw_menu_background(void)
@@ -601,25 +625,25 @@ static void draw_main_menu(double mx, double my)
     double now = glfwGetTime();
     for (int i = 0; i < MENU_CAT_COUNT; ++i)
         update_and_draw_menu_cat(&g_menu_cats[i], now);
-    glColor3f(0.43f, 0.88f, 0.92f); draw_text(240, 105, 3.2f, "COIN RUSH");
-    glColor3f(0.68f, 0.77f, 0.88f); draw_text(233, 158, 1.25f, "CATCH COINS. CHASE THE HIGH SCORE.");
+    glColor3f(0.43f, 0.88f, 0.92f); draw_centered(ARENA_W * 0.5f, 105, 3.2f, "COIN RUSH");
+    glColor3f(0.68f, 0.77f, 0.88f); draw_centered(ARENA_W * 0.5f, 158, 1.25f, "CATCH COINS. CHASE THE HIGH SCORE.");
     glColor3f(0.04f, 0.065f, 0.11f); draw_rect(220, 208, 360, 340);
     draw_button(278, 244, 244, 56, "PLAY - CREATE ROOM", point_in_rect(mx, my, 278, 244, 244, 56));
     draw_button(278, 318, 244, 56, "JOIN A ROOM", point_in_rect(mx, my, 278, 318, 244, 56));
     draw_button(278, 392, 244, 56, "EXIT GAME", point_in_rect(mx, my, 278, 392, 244, 56));
     glColor3f(0.54f, 0.65f, 0.78f);
-    draw_text(289, 480, 1.0f, "UP TO FIVE PLAYERS  |  LEFT / RIGHT TO MOVE");
+    draw_centered(ARENA_W * 0.5f, 480, 1.0f, "UP TO FIVE PLAYERS  |  LEFT / RIGHT TO MOVE");
     if (g_ui_error[0])
-    { glColor3f(1.0f, 0.48f, 0.52f); draw_text(235, 505, 1.05f, g_ui_error); }
+    { glColor3f(1.0f, 0.48f, 0.52f); draw_centered(ARENA_W * 0.5f, 505, 1.05f, g_ui_error); }
 }
 
 static void draw_exit_confirm(double mx, double my)
 {
     draw_menu_background();
-    glColor3f(0.99f, 0.62f, 0.39f); draw_text(255, 158, 2.5f, "LEAVE COIN RUSH?");
+    glColor3f(0.99f, 0.62f, 0.39f); draw_centered(ARENA_W * 0.5f, 158, 2.5f, "LEAVE COIN RUSH?");
     glColor3f(0.04f, 0.065f, 0.11f); draw_rect(190, 215, 420, 250);
     glColor3f(0.72f, 0.80f, 0.90f);
-    draw_text(253, 255, 1.15f, g_exit_from_game ? "You will leave this room and exit." : "Are you sure you want to exit?");
+    draw_centered(ARENA_W * 0.5f, 255, 1.15f, g_exit_from_game ? "You will leave this room and exit." : "Are you sure you want to exit?");
     draw_button(264, 316, 272, 54, "EXIT NOW",
                 point_in_rect(mx, my, 264, 316, 272, 54));
     draw_button(264, 385, 272, 50, "CANCEL",
@@ -629,29 +653,29 @@ static void draw_exit_confirm(double mx, double my)
 static void draw_join_code_screen(double mx, double my)
 {
     draw_menu_background();
-    glColor3f(0.43f, 0.88f, 0.92f); draw_text(257, 105, 2.6f, "JOIN A ROOM");
+    glColor3f(0.43f, 0.88f, 0.92f); draw_centered(ARENA_W * 0.5f, 105, 2.6f, "JOIN A ROOM");
     glColor3f(0.04f, 0.065f, 0.11f); draw_rect(190, 190, 420, 280);
-    glColor3f(0.68f, 0.77f, 0.88f); draw_text(276, 232, 1.3f, "ENTER THE SIX-DIGIT ROOM CODE");
+    glColor3f(0.68f, 0.77f, 0.88f); draw_centered(ARENA_W * 0.5f, 232, 1.3f, "ENTER THE SIX-DIGIT ROOM CODE");
     glColor3f(0.02f, 0.035f, 0.065f); draw_rect(264, 276, 272, 58);
     char display[7] = "______";
     for (size_t i = 0; i < g_room_code_length; ++i) display[i] = g_room_code_input[i];
-    glColor3f(1.0f, 0.83f, 0.42f); draw_text(350, 296, 2.0f, display);
+    glColor3f(1.0f, 0.83f, 0.42f); draw_centered(ARENA_W * 0.5f, 296, 2.0f, display);
     draw_button(264, 357, 272, 54, "JOIN ROOM", point_in_rect(mx, my, 264, 357, 272, 54));
     draw_button(264, 424, 272, 48, "BACK", point_in_rect(mx, my, 264, 424, 272, 48));
     if (g_ui_error[0])
-    { glColor3f(1.0f, 0.48f, 0.52f); draw_text(260, 500, 1.0f, g_ui_error); }
+    { glColor3f(1.0f, 0.48f, 0.52f); draw_centered(ARENA_W * 0.5f, 500, 1.0f, g_ui_error); }
 }
 
 static void draw_connecting(uint32_t room_code, bool create_room)
 {
     draw_menu_background();
     glColor3f(0.43f, 0.88f, 0.92f);
-    draw_text(246, 172, 2.8f, create_room ? "CREATING ROOM" : "JOINING ROOM");
+    draw_centered(ARENA_W * 0.5f, 172, 2.8f, create_room ? "CREATING ROOM" : "JOINING ROOM");
     glColor3f(0.04f, 0.065f, 0.11f); draw_rect(186, 235, 428, 184);
     char code[48]; snprintf(code, sizeof(code), "ROOM CODE  %06u", room_code);
-    glColor3f(1.0f, 0.83f, 0.42f); draw_text(252, 279, 1.8f, code);
-    glColor3f(0.70f, 0.79f, 0.89f); draw_text(251, 336, 1.15f, "Finding the room server...");
-    draw_text(234, 368, 1.0f, "Share this code so friends can join your game.");
+    glColor3f(1.0f, 0.83f, 0.42f); draw_centered(ARENA_W * 0.5f, 279, 1.8f, code);
+    glColor3f(0.70f, 0.79f, 0.89f); draw_centered(ARENA_W * 0.5f, 336, 1.15f, "Finding the room server...");
+    draw_centered(ARENA_W * 0.5f, 368, 1.0f, "Share this code so friends can join your game.");
 }
 
 static void start_room_request(uint32_t room_code, bool create_room)
@@ -692,6 +716,8 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action, 
 {
     (void)window; (void)scancode; (void)mods;
     if (action != GLFW_PRESS) return;
+    if (key == GLFW_KEY_F11)
+    { toggle_fullscreen(window); return; }
     if (key == GLFW_KEY_ESCAPE && g_screen == UI_GAME)
     { g_exit_from_game = true; g_screen = UI_EXIT_CONFIRM; return; }
     if (g_screen == UI_EXIT_CONFIRM)
@@ -791,7 +817,7 @@ static void *dds_worker(void *credentials)
 
 int main(int argc, char **argv)
 {
-    const char *credentials = argc > 1 ? argv[1] : "credentials/client1";
+    const char *credentials = argc > 1 ? argv[1] : "credentials-private/client1";
     bool software_renderer = configure_wslg_renderer();
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) { fprintf(stderr, "GLFW could not initialize.\n"); return 1; }
