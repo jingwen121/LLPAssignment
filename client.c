@@ -72,6 +72,13 @@ static char g_room_code_input[7] = "";
 static size_t g_room_code_length;
 static char g_ui_error[80] = "";
 static bool g_exit_from_game = false;
+typedef struct
+{
+    int x, y, width, height;
+    int framebuffer_width, framebuffer_height;
+    int window_width, window_height;
+} SceneViewport;
+static SceneViewport g_viewport;
 
 typedef enum { MENU_CAT_IDLE, MENU_CAT_WALK, MENU_CAT_JUMP } MenuCatAnimation;
 typedef struct
@@ -91,6 +98,56 @@ static GLuint g_cato_jump_texture;
 static void glfw_error_callback(int code, const char *description)
 {
     fprintf(stderr, "GLFW error %d: %s\n", code, description ? description : "unknown error");
+}
+
+static void update_viewport(GLFWwindow *window, int framebuffer_width, int framebuffer_height)
+{
+    if (framebuffer_width <= 0 || framebuffer_height <= 0)
+        return;
+    g_viewport.framebuffer_width = framebuffer_width;
+    g_viewport.framebuffer_height = framebuffer_height;
+    glfwGetWindowSize(window, &g_viewport.window_width, &g_viewport.window_height);
+    if (g_viewport.window_width <= 0 || g_viewport.window_height <= 0)
+        return;
+
+    float scale = fminf((float)framebuffer_width / (float)ARENA_W,
+                        (float)framebuffer_height / (float)ARENA_H);
+    g_viewport.width = (int)lroundf((float)ARENA_W * scale);
+    g_viewport.height = (int)lroundf((float)ARENA_H * scale);
+    g_viewport.x = (framebuffer_width - g_viewport.width) / 2;
+    g_viewport.y = (framebuffer_height - g_viewport.height) / 2;
+    glViewport(g_viewport.x, g_viewport.y, g_viewport.width, g_viewport.height);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, ARENA_W, ARENA_H, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+static void framebuffer_size_callback(GLFWwindow *window, int width, int height)
+{
+    update_viewport(window, width, height);
+}
+
+static void window_to_scene(double window_x, double window_y, double *scene_x, double *scene_y)
+{
+    if (g_viewport.window_width <= 0 || g_viewport.window_height <= 0 ||
+        g_viewport.width <= 0 || g_viewport.height <= 0)
+    {
+        *scene_x = *scene_y = -10000.0;
+        return;
+    }
+    double framebuffer_x = window_x * (double)g_viewport.framebuffer_width / g_viewport.window_width;
+    double framebuffer_y = window_y * (double)g_viewport.framebuffer_height / g_viewport.window_height;
+    double viewport_top = g_viewport.framebuffer_height - (g_viewport.y + g_viewport.height);
+    if (framebuffer_x < g_viewport.x || framebuffer_x >= g_viewport.x + g_viewport.width ||
+        framebuffer_y < viewport_top || framebuffer_y >= viewport_top + g_viewport.height)
+    {
+        *scene_x = *scene_y = -10000.0;
+        return;
+    }
+    *scene_x = (framebuffer_x - g_viewport.x) * ARENA_W / g_viewport.width;
+    *scene_y = (framebuffer_y - viewport_top) * ARENA_H / g_viewport.height;
 }
 
 static bool configure_wslg_renderer(void)
@@ -426,6 +483,10 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     { glVertex2f(0, (float)y); glVertex2f((float)ARENA_W, (float)y); }
     glEnd();
     glColor3f(0.43f, 0.88f, 0.92f); draw_text(24, 20, 2.1f, "COIN RUSH");
+    char room_label[32];
+    snprintf(room_label, sizeof(room_label), "ROOM  %06u", room_code);
+    glColor3f(0.62f, 0.72f, 0.84f);
+    draw_text(24, 49, 1.0f, room_label);
 
     if (!has_state)
     {
@@ -444,10 +505,17 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     snprintf(text, sizeof(text), "PLAYERS  %d/%d", active_count, MAX_PLAYERS);
     draw_text(650, 22, 1.2f, text);
 
-    if (state->phase == 1)
+    if (state->phase == 1 && g_viewport.height > 0)
+    {
+        int playfield_height = (int)lroundf((float)g_viewport.height *
+                                            (float)(ARENA_H - HUD_H) / (float)ARENA_H);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(g_viewport.x, g_viewport.y, g_viewport.width, playfield_height);
         for (int i = 0; i < MAX_COINS; ++i)
             if (state->coin_active[i])
                 draw_coin(state->coin_x[i], state->coin_y[i], state->coin_size[i], state->coin_gold[i]);
+        glDisable(GL_SCISSOR_TEST);
+    }
 
     for (int i = 0; i < MAX_PLAYERS; ++i)
         draw_player(state, i, player_id, facing[i], cat_east, cat_west);
@@ -732,17 +800,19 @@ int main(int argc, char **argv)
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_FALSE);
     glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     GLFWwindow *window = glfwCreateWindow(ARENA_W, ARENA_H, "Coin Rush", NULL, NULL);
     if (!window) { fprintf(stderr, "Could not open Coin Rush.\n"); glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
     uint64_t seed = dds_time() ^ ((uint64_t)(uintptr_t)window * UINT64_C(0x9e3779b97f4a7c15));
     srand((unsigned int)(seed ^ (seed >> 32)));
     glfwSwapInterval(software_renderer ? 2 : 1);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     int fbw = 0, fbh = 0; glfwGetFramebufferSize(window, &fbw, &fbh);
-    glViewport(0, 0, fbw, fbh); glDrawBuffer(GL_BACK); glReadBuffer(GL_BACK);
+    update_viewport(window, fbw, fbh);
+    glDrawBuffer(GL_BACK); glReadBuffer(GL_BACK);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, ARENA_W, ARENA_H, 0, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     GLuint cat_east = load_cat_texture("east"), cat_west = load_cat_texture("west");
     g_tofu_texture = load_rgba_texture(TOFU_ASSET_PATH, TOFU_SHEET_WIDTH, TOFU_SHEET_HEIGHT);
@@ -761,7 +831,9 @@ int main(int argc, char **argv)
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
-        double mx = 0, my = 0; glfwGetCursorPos(window, &mx, &my);
+        double window_mx = 0, window_my = 0, mx = 0, my = 0;
+        glfwGetCursorPos(window, &window_mx, &window_my);
+        window_to_scene(window_mx, window_my, &mx, &my);
         bool mouse_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         bool clicked = mouse_down && !previous_mouse_down; previous_mouse_down = mouse_down;
 
