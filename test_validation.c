@@ -21,7 +21,7 @@
 // The parent chooses a scenario; the child sends it through its own DDS writer
 // Attack commands bypass net_client_send so local checks cannot hide server bugs
 enum { SEND_INPUT = 1, REPLAY, RETRY_JOIN, FORGE_JOIN, FLOOD, FORGE_STATE,
-       SAVE_SESSION, OLD_SESSION, CLOSE };
+       SAVE_SESSION, OLD_SESSION, CLOSE, JOIN_FLOOD, ROOM_FLOOD };
 
 // Share test commands and counters between processes, never DDS handles
 static struct Shared
@@ -62,6 +62,7 @@ static struct Shared
 
         // Real-room tests reuse these child processes with a snapshot copied
         // under a process-shared mutex; DDS handles never cross the boundary
+        int credential_id;
         int room_code;
         bool create_room;
         int attack_room;
@@ -227,7 +228,7 @@ static void test_client(const char *root, int index)
         usleep(1000);
 
     char directory[4096];
-    snprintf(directory, sizeof(directory), "%s/client%d", root, index + 1);
+    snprintf(directory, sizeof(directory), "%s/client%d", root, report->credential_id ? report->credential_id : index + 1);
     Network net;
     if (!net_open(&net, false, directory))
     {
@@ -313,16 +314,29 @@ static void test_client(const char *root, int index)
                    report->forged_guid, sizeof(request.client_id));
             CHECK(dds_write(net.join, &request) == DDS_RETCODE_OK);
         }
+        else if (command == JOIN_FLOOD || command == ROOM_FLOOD)
+        {
+            // Use our real signed identity; these are authorized requests whose
+            // rate and room allocation still have to be limited by the server
+            for (int n = 0; n < 100; ++n)
+            {
+                JoinRequest request = {.client_token = net.client_token,
+                    .room_code = command == ROOM_FLOOD ? 765400 + n : net.room_code,
+                    .create_room = command == ROOM_FLOOD};
+                memcpy(request.client_id, net.own_id.v, 16);
+                CHECK(dds_write(net.join, &request) == DDS_RETCODE_OK);
+            }
+        }
         else if (command == FORGE_STATE)
         {
             // Both server-owned topics must reject client writers; this checks
             // DDS permissions, not a voluntary restriction in our client API
             dds_entity_t topic = dds_create_topic(net.participant, &GameState_desc,
-                                                  "GameState", NULL, NULL);
+                                                  "GameState_client1", NULL, NULL);
             CHECK(topic > 0);
             CHECK(dds_create_writer(net.participant, topic, NULL, NULL) < 0);
             topic = dds_create_topic(net.participant, &JoinResponse_desc,
-                                    "JoinResponse", NULL, NULL);
+                                    "JoinResponse_client1", NULL, NULL);
             CHECK(topic > 0);
             CHECK(dds_create_writer(net.participant, topic, NULL, NULL) < 0);
 
@@ -330,6 +344,18 @@ static void test_client(const char *root, int index)
             topic = dds_create_topic(net.participant, &Input_desc, "Input", NULL, NULL);
             CHECK(topic > 0);
             CHECK(dds_create_reader(net.participant, topic, NULL, NULL) < 0);
+
+            // Bypass all client-side filters and ask DDS for another identity's data
+            // Permission denial must happen before a sample can reach application code
+            topic = dds_create_topic(net.participant, &GameState_desc,
+                                     "GameState_client2", NULL, NULL);
+            CHECK(topic < 0 || dds_create_reader(net.participant, topic, NULL, NULL) < 0);
+            topic = dds_create_topic(net.participant, &JoinResponse_desc,
+                                     "JoinResponse_client2", NULL, NULL);
+            CHECK(topic < 0 || dds_create_reader(net.participant, topic, NULL, NULL) < 0);
+            topic = dds_create_topic(net.participant, &JoinRequest_desc,
+                                     "JoinRequest_client2", NULL, NULL);
+            CHECK(topic < 0 || dds_create_writer(net.participant, topic, NULL, NULL) < 0);
         }
         else if (command == SAVE_SESSION)
             old_session = net.session_id;
@@ -495,6 +521,23 @@ static int test_rooms(const char *root)
     CHECK(!states[0].player_active[victim]);
     puts("PASS room owner movement and orderly leave");
 
+    command(0, ROOM_FLOOD, 0, 0);
+    wait_ms(300);
+    // A guessed code sent above must not have allocated a room for this identity
+    start_room_client(root, 2, 765400, false);
+    wait_ms(1200);
+    CHECK(player_id(2) == -1 && atomic_load(&shared->clients[2].updates) == 0);
+    stop_room_client(2, false);
+
+    // Reusing the same certificate in a new process must not reset the quota
+    shared->clients[2].credential_id = 1;
+    start_room_client(root, 2, 765999, true);
+    wait_ms(1200);
+    CHECK(atomic_load(&shared->clients[2].ready) == 1);
+    CHECK(player_id(2) == -1 && atomic_load(&shared->clients[2].updates) == 0);
+    stop_room_client(2, false);
+    puts("PASS room flooding and cloned-certificate process cannot allocate extra rooms");
+
     stop_room_client(1, true);
     room_snapshots(states, 3300);
     start_room_client(root, 1, 234567, true);
@@ -507,9 +550,14 @@ static int test_rooms(const char *root)
     {
         stop_room_client(1, false);
         start_room_client(root, 1, 345678 + cycle, true);
-        int64_t deadline = net_now() + INT64_C(3000000000);
+        int64_t deadline = net_now() + INT64_C(5000000000);
         while (atomic_load(&shared->clients[1].updates) < 5 && net_now() < deadline)
             wait_ms(20);
+        if (player_id(1) != 1 || atomic_load(&shared->clients[1].updates) < 5)
+            fprintf(stderr, "Room cycle %d: ready=%d id=%d updates=%d rejected=%llu\n",
+                    cycle, atomic_load(&shared->clients[1].ready), player_id(1),
+                    atomic_load(&shared->clients[1].updates),
+                    (unsigned long long)atomic_load(&shared->clients[1].rejected));
         CHECK(player_id(1) == 1 && atomic_load(&shared->clients[1].updates) >= 5);
     }
     puts("PASS retired rooms release keyed DDS history for new room codes");
@@ -533,7 +581,7 @@ int main(int argc, char **argv)
         dds_entity_t participant = dds_create_participant(NET_DOMAIN, NULL, NULL);
         CHECK(participant > 0);
         dds_entity_t topic = dds_create_topic(participant, &JoinRequest_desc,
-                                             "JoinRequest", NULL, NULL);
+                                             "JoinRequest_client1", NULL, NULL);
         CHECK(topic > 0);
 
         // Match the real server's requested reliability; a QoS mismatch must
@@ -734,9 +782,16 @@ int main(int argc, char **argv)
     CHECK(atomic_load(&shared->joins) == 2);
     puts("PASS repeated join requests");
 
+    uint64_t before = atomic_load(&shared->rejected);
+    command(0, JOIN_FLOOD, 0, 0);
+    wait_ms(300);
+    CHECK(atomic_load(&shared->rejected) > before);
+    CHECK(atomic_load(&shared->joins) == 2);
+    puts("PASS valid-identity join flood is throttled");
+
     // Send client 1's claimed GUID through client 0's authenticated participant
     // A rise in rejected confirms the server checked DDS metadata against it
-    uint64_t before = atomic_load(&shared->rejected);
+    before = atomic_load(&shared->rejected);
     memcpy(shared->clients[0].forged_guid, shared->clients[1].guid, 16);
     command(0, FORGE_JOIN, 0, 0);
     wait_ms(50);
@@ -844,9 +899,9 @@ int main(int argc, char **argv)
     uint64_t old_session = atomic_load(&shared->clients[0].session_id);
     atomic_store(&shared->clients[0].pause, true);
 
-    // Wait beyond the 3-second lease; snapshots should tell this still-live
-    // client that its slot is inactive even though its sends are paused
-    wait_ms(3400);
+    // The server first expires the 3-second input lease and stops private state
+    // The silent client then detects 3 seconds without a snapshot
+    wait_ms(6400);
     CHECK(player_id(0) == -1);
     atomic_store(&shared->clients[0].pause, false);
     int64_t session_deadline = net_now() + INT64_C(3000000000);

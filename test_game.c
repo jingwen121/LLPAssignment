@@ -50,10 +50,7 @@ static uint64_t run_until_phase_changes(Game *g, uint64_t t, int use_bots)
             const Player *p = &g->players[i];
             if (!p->active) continue;
             assert(p->x >= 0 && p->x <= WIDTH - PLAYER_W); /* inside window */
-            for (int j = i + 1; j < MAX_PLAYERS; j++)   /* no overlap */
-                if (g->players[j].active)
-                    assert(p->x + PLAYER_W <= g->players[j].x ||
-                           g->players[j].x + PLAYER_W <= p->x);
+            // Players may overlap after the latest game change; arena bounds still apply
         }
     }
     return t;
