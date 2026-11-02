@@ -1,47 +1,60 @@
 # Coin Rush
 
-Coin Rush is a small real-time multiplayer game built in C with Cyclone DDS,
-GLFW and fixed-function OpenGL. The server owns the simulation: player
-movement, falling coins, collision checks, scores and round timing. Each client
-sends left/right input and renders the latest complete server snapshot.
+Coin Rush is a small real-time multiplayer game in C using GLFW, fixed-function
+OpenGL and Cyclone DDS. The server owns the simulation. Clients use room codes
+to create or join isolated matches.
 
 ## Build in WSL
 
-Install the project dependencies in your WSL distribution (Cyclone DDS,
-GLFW 3, OpenGL development headers, GCC and `pkg-config`). From this folder:
+Install dependencies once:
 
 ```sh
-idlc -l c messages.idl
-gcc -std=c11 -Wall -Wextra -pthread server.c game.c messages.c \
-  $(pkg-config --cflags --libs CycloneDDS) -lm -o server
-gcc -std=c11 -Wall -Wextra -pthread client.c messages.c \
-  $(pkg-config --cflags --libs glfw3 CycloneDDS) -lGL -lm -o client
+sudo apt update
+sudo apt install build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev
 ```
 
-Run `./server` first, then start `./client` in at least two WSL terminals.
-Every client joins automatically. Use the LEFT and RIGHT arrow keys or A and D
-to move; closing a client window exits that client.
+From the project directory, build both executables with one command:
 
-## Client and graphics (Part B)
+```sh
+make
+```
 
-- GLFW polls left/right movement and sends the current direction over DDS.
-- The server publishes a single `GameState` sample for each simulation tick.
-  This includes all active player positions and scores, falling coin positions
-  and types, phase, timer and winner data, so the HUD and arena share one
-  authoritative update.
-- OpenGL draws the arena grid, tinted cat players, normal and gold coins,
-  player score cards, the waiting room and the winner/results overlay.
-- Cat idle rotations live in `assets/cats/idle`. Each player has a distinct
-  tint; the sprites turn east or west as their authoritative x position moves.
-  The PNGs are included with raw RGBA copies so WSL builds need no PNG library.
-- The client keeps DDS work on a worker thread and copies received state under
-  a mutex before rendering on the GLFW thread.
-- On WSLg, the client selects Mesa's software renderer because the Intel Arc
-  D3D12 path in this environment produced black frames. The WSLg path caps
-  llvmpipe at two worker threads, synchronizes swaps to every second display
-  refresh (about 30 FPS on a 60 Hz display), batches the arena grid, and avoids
-  idle input messages to reduce CPU use.
+This generates the DDS message code from `messages.idl`, then creates the
+`server` and `client` executables. `make clean && make` forces a clean rebuild.
 
-The fixed DDS arrays are sized for five players and eight coins, matching the
-game logic constants in `game.h`. `messages.c` and `messages.h` are generated
-from `messages.idl` and are intentionally not checked in.
+## Start a match
+
+1. In one WSL terminal, run `./server`.
+2. In a second terminal, run `./client` and choose **Play - Create Room**.
+3. Share the six-digit room code shown in the lobby.
+4. Other players run `./client`, choose **Join a Room**, enter the code and
+   press Enter (or click **Join Room**).
+
+The server supports up to eight rooms with up to five players in each room.
+At least two players start a round. Close a client window to leave its room.
+Clients must be able to discover the same Cyclone DDS server on the network.
+
+## Controls
+
+- Use the left/right arrow keys or A/D to move.
+- In the room-code screen, type six digits, press Enter to join, Backspace to
+  edit, or Escape to return to the main menu.
+- Use **Exit Game** in the main menu, or press Escape during a match, to open
+  the exit confirmation. Confirming closes the client and removes that player
+  from the room; cancel returns to the previous screen.
+
+## Graphics and game screens
+
+- The main menu offers room creation and room-code joining.
+- Two menu cats use randomized idle, walk and jump animations from
+  `assets/menu/tofu_idle.png`, `cato_walk.png` and `cato_jump.png`. Each client
+  gets separate starting positions and animation timing. They bounce inside
+  bounded side lanes so they stay on screen and clear of the menu buttons.
+- The lobby waits for the second player and displays the room code to share.
+- The winner screen shows the winner, top score and results countdown.
+- Players are rendered with the cat rotation sprites in `assets/cats/idle`;
+  each player has a separate tint and faces left or right as they move.
+- The HUD, falling coins, scores, timer and player positions use the latest
+  authoritative room snapshot from the server.
+- On WSLg, the client uses Mesa software OpenGL with two worker threads and
+  synchronized frame swaps to avoid the Intel Arc D3D12 black-frame issue.

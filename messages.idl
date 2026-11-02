@@ -1,39 +1,44 @@
-//idlc -l c messages.idl
+// Regenerate with: idlc -l c messages.idl
 
 struct JoinRequest
 {
-	unsigned long long client_token;
+    unsigned long long client_token;
+    long room_code;
+    boolean create_room;
 };
 
 struct JoinResponse
 {
-	unsigned long long client_token;
-	//IDL needs int width to be clearly defined
+    unsigned long long client_token;
+    long room_code;
     long int_player_id;
 };
 
 struct Input
 {
-	long int_player_id;
+    long room_code;
+    long int_player_id;
     char ch_direction;
+    boolean leave_room;
 };
 
-/* One authoritative snapshot per server tick. Fixed arrays keep the
- * update bounded and let every client render the same players and coins. */
+/* Room code keys state instances so one room's snapshot cannot replace
+ * another room's latest update in DDS history. */
 struct GameState
 {
-	unsigned long tick;
-	long phase;
-	long time_left;
-	long winners;
-	long best_score;
-	boolean player_active[5];
-	long player_x[5];
-	long player_y[5];
-	long player_score[5];
-	boolean coin_active[8];
-	boolean coin_gold[8];
-	long coin_x[8];
-	long coin_y[8];
-	long coin_size[8];
+    @key long room_code;
+    unsigned long tick;
+    long phase;
+    long time_left;
+    long winners;
+    long best_score;
+    boolean player_active[5];
+    long player_x[5];
+    long player_y[5];
+    long player_score[5];
+    boolean coin_active[8];
+    boolean coin_gold[8];
+    long coin_x[8];
+    long coin_y[8];
+    long coin_size[8];
 };
