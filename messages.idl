@@ -1,72 +1,52 @@
-// make regenerates the C types from this file; do not edit build/messages.h
-// All 3 team members use these types so the client cannot invent its own state
+// Regenerate with: idlc -l c messages.idl
 
 struct JoinRequest
 {
-    // This routes the reply; the server still checks the GUID against DDS metadata
     octet client_id[16];
+    unsigned long long client_token;
+    long room_code;
+    boolean create_room;
 };
 
 struct JoinResponse
 {
     octet client_id[16];
-
-    // Use 0 when the server has no free player slots
+    unsigned long long client_token;
+    long room_code;
     long int_player_id;
-
-    // A fresh admission gets a fresh token; delayed input from an old slot is rejected
-    // This is sent inside encrypted DDS traffic and is not a substitute for DDS auth
     unsigned long long session_id;
 };
 
 struct Input
 {
-    // Send intent only; the server remains responsible for position and scoring
+    long room_code;
     long int_player_id;
-
-    // l/r move horizontally, n keeps the connection alive and q leaves the game
     char ch_direction;
+    boolean leave_room;
 
-    // Increase this for every input and heartbeat
+    // Bind intent to this admission; older sequences cannot be replayed
     unsigned long long seq;
-
-    // Echo the token from JoinResponse for movement, heartbeats and leaving
     unsigned long long session_id;
 };
 
-struct PlayerState
-{
-    // Array index + 1 is the player ID; inactive entries are cleared on disconnect
-    boolean active;
-
-    // Top-left of a 50x50 player inside the 800x600 arena, in pixels
-    long x;
-    long y;
-    long score;
-};
-
-struct CoinState
-{
-    boolean active;
-
-    // Centres can extend above or below the arena by the coin's half-size
-    long x;
-    long y;
-    boolean gold; // the server awards 3 points for gold; the client only displays this flag
-};
-
+/* Room code keys state instances so one room's snapshot cannot replace
+ * another room's latest update in DDS history. */
 struct GameState
 {
-    // 1 sequence covers the entire snapshot so scores and positions stay together
+    @key long room_code;
     unsigned long long seq;
-
-    // Use 0 for waiting, 1 for playing and 2 for results
-    long state;
-    long remaining_ms;
-
-    // Use 0 for a tie or no winner; the client interprets this together with the round state
-    long winner_id;
-    // Fixed arrays bound message size; no network-controlled allocation is needed
-    PlayerState players[5];
-    CoinState coins[8];
+    unsigned long tick;
+    long phase;
+    long time_left;
+    long winners;
+    long best_score;
+    boolean player_active[5];
+    long player_x[5];
+    long player_y[5];
+    long player_score[5];
+    boolean coin_active[8];
+    boolean coin_gold[8];
+    long coin_x[8];
+    long coin_y[8];
+    long coin_size[8];
 };

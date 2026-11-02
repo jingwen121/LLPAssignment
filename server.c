@@ -1,552 +1,375 @@
-/* gcc -o server server.c messages.c $(pkg-config --cflags --libs CycloneDDS) */
-
-/* Dr Khoo Teck Ping
-27 Aug 2026
-1. DDS server
-2. Supports max 5 clients
-3. Start this server, then start client one by one
-4. Each client can see itself and all other clients
-5. Each client can move itself using the arrow keys
-6. Collision detection among all players and the window is supported */
-
-/* mutex lock/unlock must be matched
-watch out for break out of loop */
-
+/* Coin Rush room server: authoritative simulation and room-code matchmaking. */
+#include <dds/dds.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <unistd.h>
 #include <time.h>
 
-#include "dds/dds.h"
-#include "messages.h"
 #include "game.h"
+#include "messages.h"
 #include "network.h"
 
-// ### GLOBAL CONSTANTS ###
-/* An array of one message (aka sample in dds terms) will be used. */
-#define MAX_SAMPLES 1
-//#define MAX_PLAYERS 5
-//
-//#define WIDTH  800
-//#define HEIGHT 600
-//#define SQ_WIDTH 50
-//// How many pixels is one step
-//#define STEP 1
+#define MAX_ROOMS 8
+#define MAX_BATCH 16
+#define FIRST_ROOM_CODE 100000
+#define LAST_ROOM_CODE 999999
 
-// Player coord defined as NW corner of square
-//typedef struct
-//{
-//    bool b_active;
-//    int x;
-//    int y;
-//} Player;
+_Static_assert(MAX_ROOMS == NET_ROOMS, "Room capacities must match");
+_Static_assert(MAX_PLAYERS == NET_PLAYERS, "Player capacities must match");
+_Static_assert(MAX_COINS == NET_COINS, "Coin capacities must match");
 
-/*
-// ### GLOBAL VARIABLES ###
-int int_num_active_players = 0;
+typedef struct
+{
+    bool active;
+    int32_t code;
+    uint64_t client_tokens[MAX_PLAYERS];
+    Game game;
 
-// Flag set by worker thread that a player just joined
-// Must be reset to false after processing by main thread
-bool b_player_join = false;
+    // Each room owns its player sessions; only DDS handles are shared
+    Network network;
+} Room;
 
-// Player ID is the array index plus 1
-// -1 = No new players
-// 0 = Invalid player ID (unable to admit new players)
-// 1~MAX_PLAYERS = Valid player IDs
-int int_new_player_id = -1;
-*/
-// Table to track clients
-static Game g_game;
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static Room g_rooms[MAX_ROOMS];
+static pthread_mutex_t g_rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// The message arrays must fit the existing game without omitting any entities
-_Static_assert(NET_PLAYERS == MAX_PLAYERS, "Player capacities must match");
-_Static_assert(NET_COINS >= MAX_COINS, "Snapshot must fit every game coin");
-
-// Current time in milliseconds, used by the game logic:
-//the 60 - second round timer to cehck if the round ended yet 
-//the input timeout : if no input arrived in the last 60 ms, the key was released, so the player stops.
 static uint64_t now_ms(void)
 {
-	return (uint64_t)dds_time() / 1000000u;
+    return (uint64_t)(dds_time() / 1000000u);
 }
 
-// Check if the coords collide with other squares
-/*
-bool detect_collision(Player a_arr_players[], int a_int_arr_len, 
-						int a_int_id, int a_int_x, int a_int_y) 
+static int find_room(int32_t code)
 {
-	bool b_res = false;
-	// Loop through the array
-	for(int i = 0; i < a_int_arr_len; i++)
-	{
-		// Index + 1 = Player ID
-		// If a player other than the player itself is active
-		if(i != a_int_id -1 && a_arr_players[i].b_active == true)
-		{
-			// If they overlap horizontally
-			if(a_int_x <= a_arr_players[i].x + SQ_WIDTH && 
-				a_arr_players[i].x <= a_int_x + SQ_WIDTH)
-			{
-				// If they overlap vertically
-				if(a_int_y <= a_arr_players[i].y + SQ_WIDTH && 
-					a_arr_players[i].y <= a_int_y + SQ_WIDTH)
-				{
-					b_res = true;
-					break;
-				}
-			}
-		}
-	}
-	
-	return b_res;
+    for (int i = 0; i < MAX_ROOMS; ++i)
+        if (g_rooms[i].active && g_rooms[i].code == code)
+            return i;
+    return -1;
 }
-*/
 
-void *worker(void *arg)
+static int find_token(const Room *room, uint64_t token)
+{
+    if (token == 0)
+        return 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+        if (room->client_tokens[i] == token)
+            return i + 1;
+    return 0;
+}
+
+static int create_room(int32_t code)
+{
+    for (int i = 0; i < MAX_ROOMS; ++i)
+        if (!g_rooms[i].active)
+        {
+            memset(&g_rooms[i], 0, sizeof(g_rooms[i]));
+            g_rooms[i].active = true;
+            g_rooms[i].code = code;
+            game_init(&g_rooms[i].game);
+            return i;
+        }
+    return -1;
+}
+
+static bool create_dds_entities(Network *net, const char *credentials,
+                                dds_entity_t *participant,
+                                dds_entity_t *join_reader,
+                                dds_entity_t *response_writer,
+                                dds_entity_t *input_reader,
+                                dds_entity_t *state_writer)
+{
+    if (!net_participant(net, true, credentials))
+        return false;
+    *participant = net->participant;
+
+    dds_entity_t join_topic = dds_create_topic(*participant, &JoinRequest_desc,
+                                                "JoinRequest", NULL, NULL);
+    dds_entity_t response_topic = dds_create_topic(*participant, &JoinResponse_desc,
+                                                   "JoinResponse", NULL, NULL);
+    dds_entity_t input_topic = dds_create_topic(*participant, &Input_desc,
+                                                 "Input", NULL, NULL);
+    dds_entity_t state_topic = dds_create_topic(*participant, &GameState_desc,
+                                                 "GameState", NULL, NULL);
+    if (join_topic < 0 || response_topic < 0 || input_topic < 0 || state_topic < 0)
+        return false;
+
+    dds_qos_t *qos = dds_create_qos();
+    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 64);
+    // Reliable admission and intent share a bounded queue; snapshots keep only
+    // the latest update per room so another room cannot replace their history
+    dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_MSECS(100));
+    dds_qset_resource_limits(qos, 64, 1, 64);
+    *join_reader = dds_create_reader(*participant, join_topic, qos, NULL);
+    *input_reader = dds_create_reader(*participant, input_topic, qos, NULL);
+    *response_writer = dds_create_writer(*participant, response_topic, qos, NULL);
+    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 1);
+    dds_qset_resource_limits(qos, MAX_ROOMS, MAX_ROOMS, 1);
+    dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, DDS_MSECS(100));
+    *state_writer = dds_create_writer(*participant, state_topic, qos, NULL);
+    dds_delete_qos(qos);
+    net->join = *join_reader;
+    net->response = *response_writer;
+    net->input = *input_reader;
+    net->state = *state_writer;
+    return *join_reader >= 0 && *input_reader >= 0 &&
+           *response_writer >= 0 && *state_writer >= 0;
+}
+
+static void fill_game_state(GameState *out, const Room *room)
+{
+    const Game *game = &room->game;
+    memset(out, 0, sizeof(*out));
+    out->room_code = room->code;
+    out->tick = game->tick;
+    out->phase = game->phase;
+    out->time_left = game->time_left;
+    out->winners = game->winners;
+    out->best_score = game->best_score;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
+        out->player_active[i] = game->players[i].active;
+        out->player_x[i] = game->players[i].x;
+        out->player_y[i] = game->players[i].y;
+        out->player_score[i] = game->players[i].score;
+    }
+    for (int i = 0; i < MAX_COINS; ++i)
+    {
+        out->coin_active[i] = game->coins[i].active;
+        out->coin_gold[i] = game->coins[i].gold;
+        out->coin_x[i] = game->coins[i].x;
+        out->coin_y[i] = game->coins[i].y;
+        out->coin_size[i] = game->coins[i].size;
+    }
+}
+
+static void *dds_worker(void *credentials)
 {
     Network net;
-	dds_entity_t participant;
-	dds_entity_t join_topic;
-	dds_entity_t response_topic;
-	dds_entity_t position_topic;
-	dds_entity_t input_topic;
-	dds_entity_t join_reader;
-	dds_entity_t response_writer;
-	dds_entity_t position_writer;
-	dds_entity_t input_reader;
-		
-	//Pointer to unknown type
-	void *samples_join[MAX_SAMPLES];	
-	dds_sample_info_t infos_join[MAX_SAMPLES];
-	void *samples_input[MAX_SAMPLES];	
-	dds_sample_info_t infos_input[MAX_SAMPLES];
-	
-	dds_return_t rc;
-	
-	/* ----------------------------------------------------- */
-    /* Create participant                                    */
-    /* ----------------------------------------------------- */
-
-    if (!net_participant(&net, true, arg))
+    dds_entity_t participant = 0, join_reader = 0, response_writer = 0;
+    dds_entity_t input_reader = 0, state_writer = 0;
+    if (!create_dds_entities(&net, credentials, &participant, &join_reader, &response_writer,
+                             &input_reader, &state_writer))
     {
-        printf("Failed to create participant\n");
-        //return 1;
+        fprintf(stderr, "Server DDS setup failed.\n");
+        if (participant > 0)
+            dds_delete(participant);
         exit(EXIT_FAILURE);
     }
-    participant = net.participant;
 
-    /* ----------------------------------------------------- */
-    /* Create topics                                          */
-    /* ----------------------------------------------------- */
-
-    join_topic = dds_create_topic
-	(
-        participant,
-        &JoinRequest_desc,
-        "JoinRequest",
-        NULL,
-        NULL
-    );
-	
-	response_topic = dds_create_topic
-	(
-        participant,
-        &JoinResponse_desc,
-        "JoinResponse",
-        NULL,
-        NULL
-    );
-	
-	position_topic = dds_create_topic
-	(
-        participant,
-        &GameState_desc,
-        "GameState",
-        NULL,
-        NULL
-    );
-	
-	input_topic = dds_create_topic
-	(
-        participant,
-        &Input_desc,
-        "Input",
-        NULL,
-        NULL
-    );
-	/* ----------------------------------------------------- */
-    /* Create readers                                         */
-    /* ----------------------------------------------------- */
-
-	// QoS = "Quality of Service": settings that control how DDS delivers
-	// messages. The baseline passed NULL, which means "use the defaults".
-	//
-	// We change one setting: history (how many unread messages to keep).
-	// Default = keep only the LATEST 1. Like a mailbox that holds one
-	// letter: if a second message arrives before we read the first, the
-	// first is thrown away. With several players that means:
-	//   - two clients joining at the same time -> one never gets an ID
-	//   - two players holding keys -> one player's input is lost
-	// KEEP_LAST 32 lets up to 32 messages wait, so none are lost.
-	//
-	// the setting belongs to the READER (the mailbox where
-	// incoming messages wait), so it is given when the readers are created.
-	dds_qos_t* qos = dds_create_qos();  // empty settings object
-	dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 32);  // keep last 32 messages
-
-    // Secure clients request reliable delivery; also bound the shared reader
-    // resources so unread input cannot allocate an unlimited application backlog
-    dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_MSECS(100));
-    dds_qset_resource_limits(qos, 32, 1, 32);
-    dds_qset_durability(qos, DDS_DURABILITY_VOLATILE);
-
-	join_reader = dds_create_reader(
-		participant,
-		join_topic,
-		qos,
-		NULL
-	);
-
-	input_reader = dds_create_reader(
-		participant,
-		input_topic,
-		qos,
-		NULL
-    );
-	dds_delete_qos(qos); // The readers copied the settings, so the settings object can be freed
-
-	 /* ----------------------------------------------------- */
-    /* Create writers                                         */
-    /* ----------------------------------------------------- */
-
-    response_writer = dds_create_writer(
-        participant,
-        response_topic,
-        NULL,
-        NULL
-    );
-	
-    // Complete snapshots replace older ones; keep only the latest sample
-    qos = dds_create_qos();
-    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 1);
-    dds_qset_resource_limits(qos, 1, 1, 1);
-    dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, DDS_MSECS(100));
-	position_writer = dds_create_writer(
-        participant,
-        position_topic,
-        qos,
-        NULL
-    );
-    dds_delete_qos(qos);
-
-    // Let the shared validators use these existing readers and response writer
-    net.join = join_reader;
-    net.input = input_reader;
-    net.response = response_writer;
-    net.state = position_writer;
-    if (join_reader < 0 || input_reader < 0 || response_writer < 0 || position_writer < 0)
+    void *join_samples[MAX_BATCH] = {0};
+    void *input_samples[MAX_BATCH] = {0};
+    dds_sample_info_t join_info[MAX_BATCH];
+    dds_sample_info_t input_info[MAX_BATCH];
+    for (int i = 0; i < MAX_BATCH; ++i)
     {
-        net_close(&net);
-        exit(EXIT_FAILURE);
-    }
-	
-	/* Initialize sample buffer, by pointing the void pointer within
-	* the buffer array to a valid sample memory location. */
-	samples_join[0] = JoinRequest__alloc();
-	samples_input[0] = Input__alloc();
-	
-	// Create a Join Response
-	JoinResponse response;
-	
-	// Create the complete game-state message
-	GameState position;
-	
-	// Last game tick we sent.
-	// the game changes 60 times a second; checking the tick number
-	// means we send once per change instead of every loop (saves traffic).
-	uint32_t last_sent_tick = 0;
-
-	/* Poll until data has been read. */
-	while (1)
-	{
-		// 1. Join requests 
-		// Loop until no more requests are waiting.
-		// loop here cus the baseline handled only ONE message per pass, so
-		// when several arrived they queued up and joins/movement lagged.
-		while ((rc = dds_take(join_reader, samples_join, infos_join, MAX_SAMPLES, MAX_SAMPLES)) > 0)
-		{
-			if (!infos_join[0].valid_data)
-				continue;
-
-            // Check the authenticated sender and handle retries before allocating
-            if (!net_server_join(&net, samples_join[0], &infos_join[0]))
-                continue;
-			printf("Join request received\n");
-
-			// Ask the game logic for a player ID (0 = game full).
-			// Lock only for this one call, so the game loop is never
-			// blocked while we do network work.
-			pthread_mutex_lock(&mutex);
-			int new_id = game_add_player(&g_game);
-			pthread_mutex_unlock(&mutex);
-
-			// Send the reply AFTER unlocking.
-			// dds_write can take time; never hold the lock during it.
-			response.int_player_id = new_id;
-			rc = net_server_accept(&net, response.int_player_id) ? DDS_RETCODE_OK : DDS_RETCODE_ERROR;
-			if (rc != DDS_RETCODE_OK)
-				DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
-		}
-		if (rc < 0)
-			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
-
-		// 2. Inputs
-		while ((rc = dds_take(input_reader, samples_input, infos_input, MAX_SAMPLES, MAX_SAMPLES)) > 0)
-		{
-			if (!infos_input[0].valid_data)
-				continue;
-			Input* input = (Input*)samples_input[0];
-
-            // Validate ownership, admission token, sequence and rate first;
-            // accepted idle input still follows the existing direction conversion
-            NetEvent event = net_server_input(&net, input, &infos_input[0]);
-            if (event.type == NET_LEAVE)
-            {
-                pthread_mutex_lock(&mutex);
-                game_remove_player(&g_game, event.player_id);
-                pthread_mutex_unlock(&mutex);
-                continue;
-            }
-            if (event.type != NET_MOVE && event.type != NET_HEARTBEAT)
-                continue;
-
-			// Coin Rush only moves left/right, so convert to -1 / 0 / +1.
-			// Up/down ( oranything else) becomes 0 = no movement.
-			int dir = 0;
-			if (input->ch_direction == 'l') dir = -1;
-			if (input->ch_direction == 'r') dir = +1;
-
-			// Only store the direction here; the actual move happens in
-			// game_tick(). the server moves everyone at a fixed speed,
-			// so sending inputs faster does not make a player faster .
-			// game_set_input also checks the player ID is 1..5 and active.
-			//  the baseline used the ID directly as an array index, so
-			// a fake ID like 99 could write outside the array and crash.
-			pthread_mutex_lock(&mutex);
-			bool ok = game_set_input(&g_game, input->int_player_id, dir, now_ms());
-			pthread_mutex_unlock(&mutex);
-			if (!ok)
-				printf("Rejected input for player ID %d\n", (int)input->int_player_id);
-		}
-		if (rc < 0)
-			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
-
-        // Expire a silent connection even when no leave message arrives
-        NetEvent expired = net_server_expire(&net);
-        if (expired.type == NET_LEAVE)
+        join_samples[i] = JoinRequest__alloc();
+        input_samples[i] = Input__alloc();
+        if (!join_samples[i] || !input_samples[i])
         {
-            pthread_mutex_lock(&mutex);
-            game_remove_player(&g_game, expired.player_id);
-            pthread_mutex_unlock(&mutex);
+            fprintf(stderr, "Server could not allocate DDS samples.\n");
+            return NULL;
+        }
+    }
+
+    uint32_t last_sent_tick[MAX_ROOMS];
+    for (int i = 0; i < MAX_ROOMS; ++i)
+        last_sent_tick[i] = UINT32_MAX;
+
+    for (;;)
+    {
+        dds_return_t count = dds_take(join_reader, join_samples, join_info,
+                                      MAX_BATCH, MAX_BATCH);
+        if (count < 0)
+            fprintf(stderr, "Join read failed: %s\n", dds_strretcode(-count));
+        for (dds_return_t n = 0; n < count; ++n)
+        {
+            if (!join_info[n].valid_data)
+                continue;
+            JoinRequest *request = (JoinRequest *)join_samples[n];
+            // Validate the authenticated sender before room creation or slot allocation
+            if (!net_server_join(&net, request, &join_info[n]))
+                continue;
+            JoinResponse response = {0};
+            response.client_token = request->client_token;
+            response.room_code = request->room_code;
+
+            int room_index = -1;
+            pthread_mutex_lock(&g_rooms_mutex);
+            int existing = find_room(request->room_code);
+            if (request->create_room)
+            {
+                if (existing < 0 && request->room_code >= FIRST_ROOM_CODE &&
+                    request->room_code <= LAST_ROOM_CODE)
+                {
+                    room_index = create_room(request->room_code);
+                    if (room_index >= 0)
+                    {
+                        last_sent_tick[room_index] = UINT32_MAX;
+                        g_rooms[room_index].network = net;
+                        g_rooms[room_index].network.room_code = request->room_code;
+                    }
+                }
+                else if (existing >= 0 && find_token(&g_rooms[existing], request->client_token))
+                    room_index = existing; /* safe retry of the same create request */
+            }
+            else
+                room_index = existing;
+
+            if (room_index >= 0)
+            {
+                Room *room = &g_rooms[room_index];
+
+                // Retry replies come from the room's GUID-bound session; a matching
+                // client token alone must never recover somebody else's slot
+                if (!net_server_join(&room->network, request, &join_info[n]))
+                {
+                    pthread_mutex_unlock(&g_rooms_mutex);
+                    continue;
+                }
+                response.int_player_id = find_token(room, request->client_token);
+                if (response.int_player_id == 0)
+                {
+                    response.int_player_id = game_add_player(&room->game);
+                    if (response.int_player_id > 0)
+                        room->client_tokens[response.int_player_id - 1] = request->client_token;
+                }
+            }
+            Network *reply = room_index >= 0 ? &g_rooms[room_index].network : &net;
+            pthread_mutex_unlock(&g_rooms_mutex);
+
+            if (response.int_player_id > 0)
+                printf("Player %d joined room %06d\n", (int)response.int_player_id,
+                       (int)response.room_code);
+            // Keep token generation and the encrypted reply in the shared helper
+            dds_return_t rc = net_server_accept(reply, response.int_player_id) ?
+                DDS_RETCODE_OK : DDS_RETCODE_ERROR;
+            if (rc < 0)
+                fprintf(stderr, "Join reply failed: %s\n", dds_strretcode(-rc));
         }
 
-		//  3. Send positions after each game tick 
-		// Copy the game while locked, then send WITHOUT holding the lock.
-		// the baseline slept 20 ms per player WHILE locked, so one
-		// broadcast to 5 players blocked the other thread for ~100 ms.
-		pthread_mutex_lock(&mutex);
-		Game snapshot = g_game;
-		pthread_mutex_unlock(&mutex);
-
-		// Only send if the game has moved on since the last send.
-		//  runs every 2 ms but the game only changes every
-		// 16 ms (one tick), so without this check we would send the same
-		// positions ~8 times over (wasted network traffic).
-		if (snapshot.tick != last_sent_tick)
-		{
-			// Remember which tick we sent, so we don't send it again
-			last_sent_tick = snapshot.tick;
-
-			// Copy each player's data into the complete game-state message
-            memset(&position, 0, sizeof(position));
-            position.seq = ++net.state_sequence;
-            position.state = snapshot.phase;
-            position.remaining_ms = snapshot.time_left * 1000;
-			for (int i = 0; i < MAX_PLAYERS; i++)
-			{
-				// Skip empty slots (no player has this ID)
-				if (!snapshot.players[i].active)
-					continue;
-
-				// Fill in the message from the SNAPSHOT, not g_game.
-				// we are not holding the lock here; reading g_game
-				// directly could see it half-updated by the game loop.
-				// Player ID = array index + 1 (IDs are 1..5, index is 0..4)
-				position.players[i] = (PlayerState){snapshot.players[i].active,
-                    snapshot.players[i].x, snapshot.players[i].y, snapshot.players[i].score};
-
-            }
-
-            // Convert coordinates only in the message; the game retains its
-            // top-left positions, sizes, scores and winner bitmask unchanged
-            for (int i = 0; i < MAX_COINS; ++i)
+        count = dds_take(input_reader, input_samples, input_info, MAX_BATCH, MAX_BATCH);
+        if (count < 0)
+            fprintf(stderr, "Input read failed: %s\n", dds_strretcode(-count));
+        for (dds_return_t n = 0; n < count; ++n)
+        {
+            if (!input_info[n].valid_data)
+                continue;
+            Input *input = (Input *)input_samples[n];
+            pthread_mutex_lock(&g_rooms_mutex);
+            int room_index = find_room(input->room_code);
+            if (room_index >= 0 && input->int_player_id >= 1 &&
+                input->int_player_id <= MAX_PLAYERS)
             {
-                const Coin *coin = &snapshot.coins[i];
-                position.coins[i] = (CoinState){coin->active, coin->x + coin->size / 2,
-                                               coin->y + coin->size / 2, coin->gold};
+                Room *room = &g_rooms[room_index];
+                NetEvent event = net_server_input(&room->network, input, &input_info[n]);
+                if (event.type == NET_NONE)
+                {
+                    pthread_mutex_unlock(&g_rooms_mutex);
+                    continue;
+                }
+                if (event.type == NET_LEAVE)
+                {
+                    int slot = input->int_player_id - 1;
+                    room->client_tokens[slot] = 0;
+                    game_remove_player(&room->game, input->int_player_id);
+                    if (game_num_active(&room->game) == 0)
+                    {
+                        // Release the keyed DDS instance before reusing this room slot
+                        GameState empty = {.room_code = room->code};
+                        dds_unregister_instance(state_writer, &empty);
+                        room->active = false;
+                        last_sent_tick[room_index] = UINT32_MAX;
+                    }
+                }
+                else
+                {
+                    int direction = input->ch_direction == 'l' ? -1 :
+                                    input->ch_direction == 'r' ? 1 : 0;
+                    game_set_input(&room->game, input->int_player_id, direction, now_ms());
+                }
             }
-            for (int i = 0; i < MAX_PLAYERS; ++i)
-                if (snapshot.winners == (1u << i))
-                    position.winner_id = i + 1;
+            pthread_mutex_unlock(&g_rooms_mutex);
+        }
 
-			// Send to all clients. No sleep and no lock held, unlike
-			// the baseline (which slept 20 ms per player while locked).
-			rc = dds_write(position_writer, &position);
-			if (rc != DDS_RETCODE_OK)
-				DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+        // A crashed client cannot send leave; expire its session and release the
+        // same game slot that an orderly leave would release
+        pthread_mutex_lock(&g_rooms_mutex);
+        for (int i = 0; i < MAX_ROOMS; ++i)
+        {
+            if (!g_rooms[i].active)
+                continue;
+            NetEvent event;
+            while ((event = net_server_expire(&g_rooms[i].network)).type == NET_LEAVE)
+            {
+                g_rooms[i].client_tokens[event.player_id - 1] = 0;
+                game_remove_player(&g_rooms[i].game, event.player_id);
+            }
+            if (game_num_active(&g_rooms[i].game) == 0)
+            {
+                GameState empty = {.room_code = g_rooms[i].code};
+                dds_unregister_instance(state_writer, &empty);
+                g_rooms[i].active = false;
+                last_sent_tick[i] = UINT32_MAX;
+            }
+        }
+        pthread_mutex_unlock(&g_rooms_mutex);
 
-		}
-		//Optimazation
-		// Short sleep so this thread doesn't spin at 100% CPU.
-		// 2 ms is much shorter than one game tick (16 ms), so new inputs
-		// are picked up quickly, but the CPU still gets to rest.
-		dds_sleepfor(DDS_MSECS(2));
-
-	}
+        Room snapshot[MAX_ROOMS];
+        pthread_mutex_lock(&g_rooms_mutex);
+        memcpy(snapshot, g_rooms, sizeof(snapshot));
+        pthread_mutex_unlock(&g_rooms_mutex);
+        for (int i = 0; i < MAX_ROOMS; ++i)
+        {
+            if (!snapshot[i].active || snapshot[i].game.tick == last_sent_tick[i])
+                continue;
+            last_sent_tick[i] = snapshot[i].game.tick;
+            GameState state;
+            fill_game_state(&state, &snapshot[i]);
+            // Keep sequences local to each room so other rooms do not look like loss
+            state.seq = ++g_rooms[i].network.state_sequence;
+            dds_return_t rc = dds_write(state_writer, &state);
+            if (rc < 0)
+                fprintf(stderr, "State publish failed: %s\n", dds_strretcode(-rc));
+        }
+        dds_sleepfor(DDS_MSECS(3));
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv)
 {
     const char *credentials = argc > 1 ? argv[1] : "credentials/server";
-	// Print each line immediately.
-	// when output is redirected to a log file, C buffers it and the
-	// log looks empty until the buffer fills; line buffering avoids that.
-	setvbuf(stdout, NULL, _IOLBF, 0);
-
-	// Seed rand(), so that the random numbers are different for each run
-	srand((unsigned int)time(NULL));
-	
-	// Start with an empty lobby (WAITING state, no players, no coins).
-	// Done BEFORE starting the worker, so no join can arrive before the game exists.
-	game_init(&g_game);
-
-	pthread_t thread;
-
-    if (pthread_create(&thread, NULL, worker, (void *)credentials) != 0)
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    srand((unsigned int)time(NULL));
+    pthread_t worker;
+    if (pthread_create(&worker, NULL, dds_worker, (void *)credentials) != 0)
     {
         perror("pthread_create");
         return 1;
     }
-	
-	printf("Coin Rush server running. Waiting for %d players...\n", MIN_PLAYERS);
+    printf("Coin Rush room server ready (up to %d rooms, %d players each).\n",
+           MAX_ROOMS, MAX_PLAYERS);
 
-	/* Main game loop.
-	   every player sees the game advance at the same
-	   steady rate, no matter how fast each client sends input.
-	   I replaced with the original main(), which looped with no sleep at all and
-	   used 100% of a CPU core just checking a flag. */
-	uint32_t last_print = 0;
-
-	while (1)
-	{
-		// for(int i = 0; i < MAX_PLAYERS; i++)
-		// {
-			//printf("%d %d %d\n",i,arr_Players[i].x, arr_Players[i].y);
-		// }
-		//printf("============\n");
-		/* dds_sleepfor (DDS_SECS (0.5)); */
-		
-		// Run ONE step of the game: players move, coins fall, catches,
-		// scores, timer, and state changes (waiting -> playing -> results).
-		pthread_mutex_lock(&mutex);
-		game_tick(&g_game, now_ms());
-		// Copy the state so we can print it after unlocking.
-		// Why: printf is slow; don't keep the worker waiting for the lock.
-		Game snapshot = g_game;
-		pthread_mutex_unlock(&mutex);
-
-		// Print the game status about once per second.
-		// Why: printing every tick (60/s) would flood the terminal.
-		// 1000 / TICK_MS = number of ticks in one second (~62).
-		if (snapshot.tick - last_print >= 1000 / TICK_MS)
-		{
-			last_print = snapshot.tick;
-			game_print(&snapshot);
-		}
-
-		// Wait until the next tick (~60 per second) instead of busy-waiting.
-		// sleeping lets the CPU rest; the server uses ~1-3% CPU instead of the baseline's 100%.
-		dds_sleepfor(DDS_MSECS(TICK_MS));
-
-		//// If a join request has been received
-		//pthread_mutex_lock(&mutex);
-		//bool b_player_join_temp = b_player_join;
-		//pthread_mutex_unlock(&mutex);
-		//if (b_player_join_temp == true)
-		//{
-		//	// printf("b_player_join_temp\n");
-		//	// Reset the flag
-		//	pthread_mutex_lock(&mutex);
-		//	b_player_join = false;
-		//	pthread_mutex_unlock(&mutex);
-		//	
-		//	// If max active players reached
-		//	if (int_num_active_players == MAX_PLAYERS)
-		//	{
-		//		// Set invalid player ID
-		//		pthread_mutex_lock(&mutex);
-		//		int_new_player_id = 0;
-		//		pthread_mutex_unlock(&mutex);
-		//	}
-		//	else
-		//	{
-		//		pthread_mutex_lock(&mutex);
-		//		// Loop through the players list
-		//		for(int i = 0; i < MAX_PLAYERS; i++)
-		//		{					
-		//			if(arr_Players[i].b_active == false)
-		//			{
-		//				// Set this index to active
-		//				arr_Players[i].b_active = true;
-		//				// Increment the number of active players
-		//				int_num_active_players++;
-		//				
-		//				// Calculate initial coords of the new player
-		//				int int_rand_x = 0;
-		//				int int_rand_y = 0;						
-		//				while(1)
-		//				{
-		//					int_rand_x = rand()%(WIDTH-SQ_WIDTH+1);
-		//					int_rand_y = rand()%(HEIGHT-SQ_WIDTH+1);
-		//					// Function don't have to lock/unlock mutex
-		//					bool b_res = detect_collision(arr_Players,
-		//						MAX_PLAYERS, i+1, int_rand_x, int_rand_y);
-		//					// If no collision detected
-		//					if(b_res == false)
-		//					{
-		//						break;
-		//					}
-		//				}
-		//				
-		//				// Set the coords
-		//				arr_Players[i].x = int_rand_x;
-		//				arr_Players[i].y = int_rand_y;
-		//				
-		//				// Set player ID to be the index plus 1
-		//				/* pthread_mutex_lock(&mutex); */
-		//				int_new_player_id = i+1;
-		//				/* printf("int_new_player_id=%d\n", int_new_player_id); */
-		//				/* pthread_mutex_unlock(&mutex); */
-		//				break;
-		//			}
-		//		}
-		//		pthread_mutex_unlock(&mutex);
-		//	}
-		//}		
-	}
-	
-	return 0;
+    uint64_t last_status = 0;
+    for (;;)
+    {
+        uint64_t now = now_ms();
+        pthread_mutex_lock(&g_rooms_mutex);
+        for (int i = 0; i < MAX_ROOMS; ++i)
+            if (g_rooms[i].active)
+                game_tick(&g_rooms[i].game, now);
+        if (now - last_status >= 1000)
+        {
+            last_status = now;
+            for (int i = 0; i < MAX_ROOMS; ++i)
+                if (g_rooms[i].active)
+                    printf("Room %06d: %d player(s), phase %d, %ds left\n",
+                           (int)g_rooms[i].code, game_num_active(&g_rooms[i].game),
+                           (int)g_rooms[i].game.phase, g_rooms[i].game.time_left);
+        }
+        pthread_mutex_unlock(&g_rooms_mutex);
+        dds_sleepfor(DDS_MSECS(TICK_MS));
+    }
+    return 0;
 }

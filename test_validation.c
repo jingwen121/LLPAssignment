@@ -3,6 +3,7 @@
 // Run without another game using DDS domain 42 so discovery cannot mix the runs
 #include "network.h"
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -58,6 +59,15 @@ static struct Shared
         char direction;
         uint8_t guid[16];
         uint8_t forged_guid[16];
+
+        // Real-room tests reuse these child processes with a snapshot copied
+        // under a process-shared mutex; DDS handles never cross the boundary
+        int room_code;
+        bool create_room;
+        int attack_room;
+        uint64_t attack_session;
+        pthread_mutex_t snapshot_mutex;
+        GameState snapshot;
     } clients[6];
 } *shared;
 
@@ -99,9 +109,15 @@ static void test_server(const char *root)
 
     // Populate every part of the agreed payload without simulating a round
     // This checks transport of game-state fields, not coin spawning or winner logic
-    GameState state = {.state = 1, .remaining_ms = 60000};
+    GameState state = {.phase = 1, .time_left = 60};
     for (int i = 0; i < NET_COINS; ++i)
-        state.coins[i] = (CoinState){true, i * (800 / NET_COINS), -i * 60, i == 0};
+    {
+        state.coin_active[i] = true;
+        state.coin_x[i] = i * (800 / NET_COINS);
+        state.coin_y[i] = -i * 60;
+        state.coin_gold[i] = i == 0;
+        state.coin_size[i] = i == 0 ? 14 : 20;
+    }
     int64_t last_snapshot = 0;
     atomic_store(&shared->server_ready, 1);
 
@@ -122,10 +138,13 @@ static void test_server(const char *root)
                 // Give the next free slot to this client
                 for (int i = 0; i < NET_PLAYERS; ++i)
                 {
-                    if (!state.players[i].active)
+                    if (!state.player_active[i])
                     {
                         id = i + 1;
-                        state.players[i] = (PlayerState){true, 100 + i * 100, 500, 3};
+                        state.player_active[i] = true;
+                        state.player_x[i] = 100 + i * 100;
+                        state.player_y[i] = 500;
+                        state.player_score[i] = 3;
                         break;
                     }
                 }
@@ -138,7 +157,7 @@ static void test_server(const char *root)
             }
             else if (event.type == NET_LEAVE)
             {
-                state.players[event.player_id - 1] = (PlayerState){0};
+                state.player_active[event.player_id - 1] = false;
                 atomic_fetch_add(&shared->leaves, 1);
             }
             else if (event.type == NET_MOVE)
@@ -160,21 +179,24 @@ static void test_server(const char *root)
             GameState bad = state;
             switch (bad_kind)
             {
-                case 1: bad.players[0].x = INT_MAX; break;
-                case 2: bad.players[0].x = -1; break;
-                case 3: bad.players[0].y = 551; break;
-                case 4: bad.players[0].y = -1; break;
-                case 5: bad.players[0].score = -1; break;
-                case 6: bad.state = -1; break;
-                case 7: bad.state = 3; break;
-                case 8: bad.remaining_ms = -1; break;
-                case 9: bad.remaining_ms = 60001; break;
-                case 10: bad.winner_id = -1; break;
-                case 11: bad.winner_id = 6; break;
-                case 12: bad.coins[0].x = -1; break;
-                case 13: bad.coins[0].x = 801; break;
-                case 14: bad.coins[0].y = -621; break;
-                case 15: bad.coins[0].y = 621; break;
+                case 1: bad.player_x[0] = INT_MAX; break;
+                case 2: bad.player_x[0] = -1; break;
+                case 3: bad.player_y[0] = 551; break;
+                case 4: bad.player_y[0] = -1; break;
+                case 5: bad.player_score[0] = -1; break;
+                case 6: bad.phase = -1; break;
+                case 7: bad.phase = 3; break;
+                case 8: bad.time_left = -1; break;
+                case 9: bad.time_left = 61; break;
+                case 10: bad.winners = -1; break;
+                case 11: bad.winners = 32; break;
+                case 12: bad.coin_x[0] = -1; break;
+                case 13: bad.coin_x[0] = 801; break;
+                case 14: bad.coin_y[0] = -621; break;
+                case 15: bad.coin_y[0] = 621; break;
+                case 17: bad.coin_size[0] = INT_MAX; break;
+                case 18: bad.best_score = -1; break;
+                case 19: bad.room_code = 345678; break;
             }
 
             // Kind 16 deliberately bypasses net_server_state so the sequence is
@@ -213,6 +235,9 @@ static void test_client(const char *root, int index)
         exit(1);
     }
 
+    if (report->room_code)
+        net_client_room(&net, report->room_code, report->create_room, (uint64_t)net_now());
+
     // Publish the GUID before ready; the parent needs a real second identity
     // when constructing an impersonation attempt from the first client
     memcpy(report->guid, net.own_id.v, sizeof(report->guid));
@@ -227,16 +252,26 @@ static void test_client(const char *root, int index)
         {
             atomic_fetch_add(&report->updates, 1);
 
-            // Verify the values, not just arrival counts; A schema mismatch can
-            // deliver a sample while making coins or HUD fields unusable for the client
-            CHECK(snapshot.state == 1 && snapshot.remaining_ms == 60000);
-            for (int i = 0; i < NET_COINS; ++i)
-                CHECK(snapshot.coins[i].active && snapshot.coins[i].x == i * (800 / NET_COINS) &&
-                      snapshot.coins[i].y == -i * 60 && snapshot.coins[i].gold == (i == 0));
-            for (int i = 0; i < NET_PLAYERS; ++i)
-                if (snapshot.players[i].active)
-                    CHECK(snapshot.players[i].score == 3);
-            atomic_fetch_add(&report->payload_checks, 1);
+            if (report->room_code)
+            {
+                CHECK(snapshot.room_code == report->room_code);
+                pthread_mutex_lock(&report->snapshot_mutex);
+                report->snapshot = snapshot;
+                pthread_mutex_unlock(&report->snapshot_mutex);
+            }
+            else
+            {
+                // Verify the values, not just arrival counts; A schema mismatch can
+                // deliver a sample while making coins or HUD fields unusable for the client
+                CHECK(snapshot.phase == 1 && snapshot.time_left == 60);
+                for (int i = 0; i < NET_COINS; ++i)
+                    CHECK(snapshot.coin_active[i] && snapshot.coin_x[i] == i * (800 / NET_COINS) &&
+                          snapshot.coin_y[i] == -i * 60 && snapshot.coin_gold[i] == (i == 0));
+                for (int i = 0; i < NET_PLAYERS; ++i)
+                    if (snapshot.player_active[i])
+                        CHECK(snapshot.player_score[i] == 3);
+                atomic_fetch_add(&report->payload_checks, 1);
+            }
         }
 
         int command = atomic_load(&report->command);
@@ -249,22 +284,31 @@ static void test_client(const char *root, int index)
             int count = command == FLOOD ? 2000 : 1;
             for (int i = 0; i < count; ++i)
             {
-                Input input = {report->input_id, report->direction,
-                               command == REPLAY ? previous : ++net.seq,
-                               command == OLD_SESSION ? old_session : net.session_id};
+                Input input = {.room_code = report->attack_room ? report->attack_room : net.room_code,
+                    .int_player_id = report->input_id, .ch_direction = report->direction,
+                    .leave_room = report->direction == 'q',
+                    .seq = report->attack_session ? UINT64_C(1000000) :
+                           command == REPLAY ? previous : ++net.seq,
+                    .session_id = report->attack_session ? report->attack_session :
+                                  command == OLD_SESSION ? old_session : net.session_id};
                 if (command != REPLAY)
                     previous = input.seq;
 
                 // Record send time immediately before writing to DDS
                 atomic_store(&report->sent_at, net_now());
                 CHECK(dds_write(net.input, &input) == DDS_RETCODE_OK);
+                if (report->room_code && !report->attack_session)
+                {
+                    // Keep a scripted key press alive until its next heartbeat
+                    net.last_input = net_now();
+                }
             }
         }
         else if (command == RETRY_JOIN || command == FORGE_JOIN)
         {
             // A retry uses our real GUID; a forgery claims another participant's
             // GUID while DDS metadata still identifies this sending process
-            JoinRequest request;
+            JoinRequest request = {0};
             memcpy(request.client_id, command == RETRY_JOIN ? report->guid :
                    report->forged_guid, sizeof(request.client_id));
             CHECK(dds_write(net.join, &request) == DDS_RETCODE_OK);
@@ -355,8 +399,133 @@ static int compare_time(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+// Reuse the protocol harness's process ownership and cleanup for real rooms
+static void start_room_client(const char *root, int i, int code, bool create)
+{
+    struct Client *report = &shared->clients[i];
+    report->room_code = code;
+    report->create_room = create;
+    report->attack_room = 0;
+    report->attack_session = 0;
+    atomic_store(&report->stop, false);
+    atomic_store(&report->ready, 0);
+    atomic_store(&report->player_id, -1);
+    atomic_store(&report->updates, 0);
+    atomic_store(&report->command, 0);
+    atomic_store(&report->start, true);
+    fflush(NULL);
+    children[i + 1] = fork();
+    CHECK(children[i + 1] >= 0);
+    if (children[i + 1] == 0)
+        test_client(root, i);
+}
+
+static void stop_room_client(int i, bool crash)
+{
+    if (crash)
+        CHECK(kill(children[i + 1], SIGKILL) == 0);
+    else
+        command(i, CLOSE, 0, 0);
+    int status;
+    CHECK(waitpid(children[i + 1], &status, 0) == children[i + 1]);
+    children[i + 1] = 0;
+    CHECK(crash ? WIFSIGNALED(status) : WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void room_snapshots(GameState states[3], int milliseconds)
+{
+    wait_ms(milliseconds);
+    for (int i = 0; i < 3; ++i)
+    {
+        pthread_mutex_lock(&shared->clients[i].snapshot_mutex);
+        states[i] = shared->clients[i].snapshot;
+        pthread_mutex_unlock(&shared->clients[i].snapshot_mutex);
+    }
+}
+
+static int test_rooms(const char *root)
+{
+    // Each certificate gets its own process, matching how the game is launched
+    // This also keeps Cyclone's process-local security state independent
+    shared = mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE,
+                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(shared != MAP_FAILED);
+    memset(shared, 0, sizeof(*shared));
+    parent_pid = getpid();
+    atexit(cleanup);
+    pthread_mutexattr_t attr;
+    CHECK(pthread_mutexattr_init(&attr) == 0);
+    CHECK(pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED) == 0);
+    for (int i = 0; i < 3; ++i)
+        CHECK(pthread_mutex_init(&shared->clients[i].snapshot_mutex, &attr) == 0);
+    pthread_mutexattr_destroy(&attr);
+    GameState states[3] = {0};
+    for (int i = 0; i < 3; ++i)
+        start_room_client(root, i, i == 1 ? 234567 : 123456, i < 2);
+    room_snapshots(states, 2500);
+    for (int i = 0; i < 3; ++i)
+        CHECK(player_id(i) > 0 && atomic_load(&shared->clients[i].updates) > 30);
+    CHECK(player_id(0) != player_id(2) && player_id(1) == 1);
+    CHECK(states[0].phase == 1 && states[2].phase == 1 && states[1].phase == 0);
+    puts("PASS separate rooms retain independent snapshots and player slots");
+
+    int victim = player_id(2) - 1;
+    int x = states[2].player_x[victim];
+
+    // Even knowing the victim's token must not bypass authenticated GUID ownership
+    shared->clients[0].attack_room = 123456;
+    shared->clients[0].attack_session = atomic_load(&shared->clients[2].session_id);
+    command(0, SEND_INPUT, victim + 1, 'r');
+    room_snapshots(states, 200);
+    CHECK(states[2].player_x[victim] == x);
+
+    // An admission in room 1 must not authorize the same player ID in room 2
+    shared->clients[0].attack_room = 234567;
+    shared->clients[0].attack_session = atomic_load(&shared->clients[0].session_id);
+    command(0, SEND_INPUT, player_id(1), 'q');
+    room_snapshots(states, 200);
+    CHECK(states[1].player_active[player_id(1) - 1]);
+    puts("PASS forged movement and cross-room leave cannot affect another player");
+
+    command(2, SEND_INPUT, victim + 1, 'l');
+    room_snapshots(states, 50);
+    CHECK(states[2].player_x[victim] < x);
+    stop_room_client(2, false);
+    room_snapshots(states, 200);
+    CHECK(!states[0].player_active[victim]);
+    puts("PASS room owner movement and orderly leave");
+
+    stop_room_client(1, true);
+    room_snapshots(states, 3300);
+    start_room_client(root, 1, 234567, true);
+    room_snapshots(states, 1200);
+    CHECK(player_id(1) == 1 && atomic_load(&shared->clients[1].updates) > 10);
+    puts("PASS crashed room expires and its code can be reused");
+
+    // More than 8 room codes over time must not exhaust the bounded keyed writer
+    for (int cycle = 0; cycle < NET_ROOMS + 1; ++cycle)
+    {
+        stop_room_client(1, false);
+        start_room_client(root, 1, 345678 + cycle, true);
+        int64_t deadline = net_now() + INT64_C(3000000000);
+        while (atomic_load(&shared->clients[1].updates) < 5 && net_now() < deadline)
+            wait_ms(20);
+        CHECK(player_id(1) == 1 && atomic_load(&shared->clients[1].updates) >= 5);
+    }
+    puts("PASS retired rooms release keyed DDS history for new room codes");
+    stop_room_client(0, false);
+    stop_room_client(1, false);
+    for (int i = 0; i < 3; ++i)
+        pthread_mutex_destroy(&shared->clients[i].snapshot_mutex);
+    CHECK(munmap(shared, sizeof(*shared)) == 0);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "--rooms") == 0)
+        return test_rooms(argv[2]);
+
     if (argc == 2 && strcmp(argv[1], "--plain") == 0)
     {
         // Deliberately bypass net_open to model a participant that omits DDS
@@ -395,7 +564,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (argc == 3 && (strcmp(argv[1], "--probe") == 0 || strcmp(argv[1], "--link") == 0 ||
+    if ((argc == 3 || argc == 4) && (strcmp(argv[1], "--probe") == 0 || strcmp(argv[1], "--link") == 0 ||
                       strcmp(argv[1], "--game") == 0))
     {
         // Use a real client process when checking admission to the game server
@@ -403,6 +572,9 @@ int main(int argc, char **argv)
         if (!net_open(&net, false, argv[2]))
             return 1;
 
+        // Real-server probes explicitly create or join the same test room
+        net_client_room(&net, 123456, argc == 4 && strcmp(argv[3], "--create") == 0,
+                        (uint64_t)net_now());
         GameState snapshot;
         bool game_test = strcmp(argv[1], "--game") == 0;
         bool link_test = strcmp(argv[1], "--probe") != 0;
@@ -440,41 +612,40 @@ int main(int argc, char **argv)
 
                 if (game_test && net.player_id > 0)
                 {
-                    int x = snapshot.players[net.player_id - 1].x;
+                    int x = snapshot.player_x[net.player_id - 1];
                     if (first_x == -1)
                         first_x = x;
                     moved |= x != first_x;
                     int coins = 0;
                     for (int i = 0; i < NET_COINS; ++i)
-                        coins += snapshot.coins[i].active;
+                        coins += snapshot.coin_active[i];
                     if (coins > most_coins)
                         most_coins = coins;
-                    if (snapshot.state == 1 && playing_at == 0)
+                    if (snapshot.phase == 1 && playing_at == 0)
                         playing_at = received;
 
                     // Check the transmitted winner against the same snapshot's
-                    // scores; ties use ID 0 and a single leader keeps its ID
-                    if (snapshot.state == 2 && !results)
+                    // scores; the bitmask retains every tied leader
+                    if (snapshot.phase == 2 && !results)
                     {
                         CHECK(playing_at != 0);
                         CHECK(received - playing_at >= INT64_C(59000000000));
                         CHECK(received - playing_at <= INT64_C(62000000000));
-                        int best = -1, winner = 0, leaders = 0;
+                        int best = -1, winners = 0;
                         for (int i = 0; i < NET_PLAYERS; ++i)
                         {
-                            const PlayerState *player = &snapshot.players[i];
-                            if (!player->active)
+                            if (!snapshot.player_active[i])
                                 continue;
-                            if (player->score > best)
+                            if (snapshot.player_score[i] > best)
                             {
-                                best = player->score;
-                                winner = i + 1;
-                                leaders = 1;
+                                best = snapshot.player_score[i];
+                                winners = 1 << i;
                             }
-                            else if (player->score == best)
-                                ++leaders;
+                            else if (snapshot.player_score[i] == best)
+                                winners |= 1 << i;
                         }
-                        CHECK(snapshot.winner_id == (leaders == 1 ? winner : 0));
+                        CHECK(snapshot.winners == winners);
+                        CHECK(snapshot.best_score == best);
                         results = true;
                     }
                 }
@@ -623,7 +794,7 @@ int main(int argc, char **argv)
 
     // Wait for each rejection before sending the next malformed sample so a
     // depth-1 reader cannot replace it before the client has a chance to inspect it
-    for (int kind = 1; kind <= 16; ++kind)
+    for (int kind = 1; kind <= 19; ++kind)
     {
         before = atomic_load(&shared->clients[0].rejected);
         atomic_store(&shared->bad_snapshot, kind);

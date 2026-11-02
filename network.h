@@ -10,6 +10,7 @@
 // Capacity covers the current game without changing how many coins it spawns
 #define NET_COINS 8
 #define NET_DOMAIN 42
+#define NET_ROOMS 8
 
 // These are monotonic nanoseconds; neither timeout depends on the wall clock
 // The server applies the movement limit even if a client removes its own limiter
@@ -35,6 +36,7 @@ typedef struct
 
     // Ownership survives a retry, but a new admission must not reuse an old token
     uint64_t session_id;
+    uint64_t client_token;
 
     // Save the last accepted input so older inputs cannot be replayed
     uint64_t seq;
@@ -76,6 +78,13 @@ typedef struct
     // received counts validated snapshots; rejected also includes rate limiting
     uint64_t rejected;
     uint64_t received;
+    // Room routing is checked alongside GUID ownership; the room code alone
+    // never authorizes movement or reveals another player's admission token
+    int32_t room_code;
+    bool create_room;
+    uint64_t client_token;
+    int32_t pending_room;
+    uint64_t pending_token;
     bool server;
 } Network;
 
@@ -104,6 +113,8 @@ bool net_server_state(Network *net, GameState *state);
 // Retry joins and send input or heartbeats without depending on the render rate
 // Poll state and call send regularly on the same worker; false from state can
 // simply mean there is no new valid snapshot; false from send is a write failure
+// Select a room before sending its first join; 0 is reserved for the protocol fixture
+void net_client_room(Network *net, int32_t room_code, bool create_room, uint64_t token);
 bool net_client_send(Network *net, char direction);
 bool net_client_state(Network *net, GameState *state);
 

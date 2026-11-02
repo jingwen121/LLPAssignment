@@ -101,7 +101,7 @@ def checks():
                  "-CAfile", ca, "-out", Path(temporary) / f"{policy}.xml"],
                 f"signed-{policy}.log")
         with running(["./build/server", directory / "server"], "fresh-server.log"):
-            run(["./build/test_validation", "--probe", directory / "client1"],
+            run(["./build/test_validation", "--probe", directory / "client1", "--create"],
                 "fresh-client.log")
     run(["./build/test_validation", TRUSTED], "integration.log")
     run(["./build/server", WORK / "missing"], "missing-server.log", expected=1)
@@ -151,15 +151,17 @@ def checks():
 
     with running(["./build/server", TRUSTED / "server"], "real-server.log") as server:
         # The probe retries discovery; no fixed startup sleep is needed here
-        run(["./build/test_validation", "--probe", TRUSTED / "client1"], "trusted.log")
+        run(["./build/test_validation", "--probe", TRUSTED / "client1", "--create"], "trusted.log")
         run(["./build/test_validation", "--probe", FOREIGN / "client1"],
             "foreign-ca.log", expected=2)
         run(["./build/test_validation", "--plain"], "plaintext-participant.log")
+        run(["./build/test_validation", "--rooms", TRUSTED], "room-security.log")
         # Start 2 real clients together so the existing game starts a round;
         # both must receive movement, coin state and the final server result
         with contextlib.ExitStack() as clients:
             participants = [clients.enter_context(running(
-                ["./build/test_validation", "--game", TRUSTED / f"client{i}"],
+                ["./build/test_validation", "--game", TRUSTED / f"client{i}",
+                 *(["--create"] if i == 1 else [])],
                 f"game-client-{i}.log")) for i in (1, 2)]
             for client in participants:
                 require(client.wait(timeout=75) == 0, "Actual game transport check failed")
@@ -182,7 +184,7 @@ def profile():
     # Remove only the DDS polling sleep in the control build; the game must keep
     # its fixed tick interval so the comparison does not change game speed
     source = (ROOT / "server.c").read_text()
-    sleep = "dds_sleepfor(DDS_MSECS(2));"
+    sleep = "dds_sleepfor(DDS_MSECS(3));"
     require(source.count(sleep) == 1, "Update the polling experiment for the changed worker")
     busy_source = WORK / "server-busy.c"
     busy_source.write_text(source.replace(sleep, "(void)0; /* QA busy-poll control */"))
@@ -215,7 +217,8 @@ def profile():
         process = stack.enter_context(running(
             ["./build/server", TRUSTED / "server"], "profile-loaded-server.log"))
         clients = [stack.enter_context(running(
-            ["./build/test_validation", "--link", TRUSTED / f"client{i}"],
+            ["./build/test_validation", "--link", TRUSTED / f"client{i}",
+             *(["--create"] if i == 1 else [])],
             f"profile-client-{i}.log")) for i in range(1, 6)]
         time.sleep(2)
         before, _ = cpu_sample(process)
@@ -343,7 +346,7 @@ def loss():
                         "delay", delay, "1ms", "loss", percent], check=True)
         try:
             with running(["./build/server", TRUSTED / "server"], f"loss-{label}-server.log"):
-                output = run(["./build/test_validation", "--link", TRUSTED / "client1"],
+                output = run(["./build/test_validation", "--link", TRUSTED / "client1", "--create"],
                              f"loss-{label}-client.log", timeout=15)
                 print(output, end="", flush=True)
                 run(["tc", "-s", "qdisc", "show", "dev", "lo"], f"loss-{label}-queue.log")
@@ -368,7 +371,9 @@ def main():
         # alone cannot find memory errors in its main/worker handoff or shutdown
         with running(["./build/server_sanitized", TRUSTED / "server"],
                      "sanitized-server.log", env) as server:
-            run(["./build/test_sanitized", "--link", TRUSTED / "client1"],
+            run(["./build/test_sanitized", "--rooms", TRUSTED],
+                "sanitized-rooms.log", env=env)
+            run(["./build/test_sanitized", "--link", TRUSTED / "client1", "--create"],
                 "sanitized-link.log", env=env)
             server.send_signal(signal.SIGINT)
             require(server.wait(timeout=5) in (0, -signal.SIGINT), "Sanitized game server failed on shutdown")
