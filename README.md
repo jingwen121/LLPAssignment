@@ -29,10 +29,18 @@ to move; closing a client window exits that client.
   This includes all active player positions and scores, falling coin positions
   and types, phase, timer and winner data, so the HUD and arena share one
   authoritative update.
-- OpenGL draws the arena grid, colored player squares, normal and gold coins,
+- OpenGL draws the arena grid, tinted cat players, normal and gold coins,
   player score cards, the waiting room and the winner/results overlay.
+- Cat idle rotations live in `assets/cats/idle`. Each player has a distinct
+  tint; the sprites turn east or west as their authoritative x position moves.
+  The PNGs are included with raw RGBA copies so WSL builds need no PNG library.
 - The client keeps DDS work on a worker thread and copies received state under
   a mutex before rendering on the GLFW thread.
+- On WSLg, the client selects Mesa's software renderer because the Intel Arc
+  D3D12 path in this environment produced black frames. The WSLg path caps
+  llvmpipe at two worker threads, synchronizes swaps to every second display
+  refresh (about 30 FPS on a 60 Hz display), batches the arena grid, and avoids
+  idle input messages to reduce CPU use.
 
 The fixed DDS arrays are sized for five players and eight coins, matching the
 game logic constants in `game.h`. `messages.c` and `messages.h` are generated

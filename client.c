@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dds/dds.h"
 #include "messages.h"
@@ -27,6 +28,8 @@
 #define PLAYER_H 50
 #define MAX_PLAYERS 5
 #define MAX_COINS 8
+#define CAT_SPRITE_SIZE 64
+#define CAT_ASSET_DIR "assets/cats/idle/"
 
 typedef struct
 {
@@ -39,24 +42,40 @@ typedef struct
 
 static ClientData g_client;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* Facing is inferred from authoritative player positions in each DDS snapshot. */
+static int g_player_facing[MAX_PLAYERS] = {1, 1, 1, 1, 1};
 
 static void glfw_error_callback(int code, const char *description)
 {
     fprintf(stderr, "GLFW error %d: %s\n", code, description ? description : "unknown error");
 }
 
-static void configure_wslg_renderer(void)
+static bool configure_wslg_renderer(void)
 {
+    bool software_fallback = false;
 #if defined(__linux__)
     const char *wsl = getenv("WSL_DISTRO_NAME");
     const char *wayland = getenv("WAYLAND_DISPLAY");
     const char *software_gl = getenv("LIBGL_ALWAYS_SOFTWARE");
-    if (wsl && *wsl && wayland && *wayland && (!software_gl || !*software_gl))
+    if (wsl && *wsl && wayland && *wayland)
     {
-        if (setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1) == 0)
-            fprintf(stderr, "WSLg detected; using Mesa software OpenGL for this client.\n");
+        if (!software_gl || !*software_gl)
+        {
+            if (setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1) == 0)
+                software_fallback = true;
+        }
+        else if (strcmp(software_gl, "1") == 0)
+            software_fallback = true;
+
+        /* Several llvmpipe clients default to every logical CPU each.
+         * Cap worker threads per window to prevent oversubscription. */
+        if (software_fallback && !getenv("LP_NUM_THREADS"))
+            setenv("LP_NUM_THREADS", "2", 0);
+        if (software_fallback)
+            fprintf(stderr, "WSLg detected; using Mesa software OpenGL (2 worker threads).\n");
     }
 #endif
+    return software_fallback;
 }
 
 static void draw_rect(float x, float y, float w, float h)
@@ -120,33 +139,92 @@ static void draw_coin(int x, int y, int size, bool gold)
     glEnd();
 }
 
-static void draw_player(const GameState *state, int index, int my_id)
+static GLuint load_cat_texture(const char *direction)
 {
+    char path[128];
+    snprintf(path, sizeof(path), CAT_ASSET_DIR "%s.rgba", direction);
+    FILE *file = fopen(path, "rb");
+    if (!file)
+    {
+        fprintf(stderr, "Could not load cat sprite %s; using fallback player shapes.\n", path);
+        return 0;
+    }
+
+    unsigned char pixels[CAT_SPRITE_SIZE * CAT_SPRITE_SIZE * 4];
+    size_t bytes = fread(pixels, 1, sizeof(pixels), file);
+    int extra = fgetc(file);
+    fclose(file);
+    if (bytes != sizeof(pixels) || extra != EOF)
+    {
+        fprintf(stderr, "Invalid RGBA cat sprite: %s\n", path);
+        return 0;
+    }
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, CAT_SPRITE_SIZE, CAT_SPRITE_SIZE,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
+static void draw_cat(GLuint texture, float x, float y, float tint_r, float tint_g, float tint_b)
+{
+    if (texture == 0)
+        return;
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glColor4f(tint_r, tint_g, tint_b, 1.0f);
+    glBegin(GL_QUADS);
+    /* The RGBA files are stored top row first, while OpenGL texture v=0
+     * addresses the first uploaded row. Keep the image's top at screen top. */
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(x, y);
+    glTexCoord2f(1.0f, 0.0f); glVertex2f(x + CAT_SPRITE_SIZE, y);
+    glTexCoord2f(1.0f, 1.0f); glVertex2f(x + CAT_SPRITE_SIZE, y + CAT_SPRITE_SIZE);
+    glTexCoord2f(0.0f, 1.0f); glVertex2f(x, y + CAT_SPRITE_SIZE);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+}
+
+static void draw_player(const GameState *state, int index, int my_id,
+                        int facing, GLuint cat_east, GLuint cat_west)
+{
+    /* Multiplicative tints keep the cat's outlines and shading while making
+     * each player easy to distinguish, even when sprites overlap. */
     static const float colors[MAX_PLAYERS][3] = {
-        {0.31f, 0.73f, 1.00f}, {1.00f, 0.42f, 0.49f}, {0.64f, 0.50f, 1.00f},
-        {1.00f, 0.63f, 0.27f}, {0.27f, 0.85f, 0.58f}};
+        {0.62f, 0.88f, 1.00f}, {1.00f, 0.58f, 0.72f}, {0.78f, 0.65f, 1.00f},
+        {1.00f, 0.84f, 0.48f}, {0.55f, 1.00f, 0.67f}};
     if (!state->player_active[index])
         return;
 
     int x = state->player_x[index];
     int y = state->player_y[index];
     const float *color = colors[index];
-
-    glColor3f(0.02f, 0.04f, 0.08f);
-    draw_rect((float)x + 3.0f, (float)y + 4.0f, PLAYER_W, PLAYER_H);
-    glColor3f(color[0], color[1], color[2]);
-    draw_rect((float)x, (float)y, PLAYER_W, PLAYER_H);
-    glColor3f(0.09f, 0.13f, 0.20f);
-    draw_rect((float)x + 5.0f, (float)y + 7.0f, PLAYER_W - 10.0f, 8.0f);
-
-    glColor3f(0.04f, 0.07f, 0.12f);
-    char label[24];
-    snprintf(label, sizeof(label), "P%d", index + 1);
-    draw_text((float)x + 10.0f, (float)y + 24.0f, 1.8f, label);
+    GLuint texture = facing < 0 ? cat_west : cat_east;
+    if (texture != 0)
+        draw_cat(texture, (float)x - 7.0f, (float)y - 28.0f, color[0], color[1], color[2]);
+    else
+    {
+        glColor3f(0.02f, 0.04f, 0.08f);
+        draw_rect((float)x + 3.0f, (float)y + 4.0f, PLAYER_W, PLAYER_H);
+        glColor3f(color[0], color[1], color[2]);
+        draw_rect((float)x, (float)y, PLAYER_W, PLAYER_H);
+        glColor3f(0.04f, 0.07f, 0.12f);
+        char label[24];
+        snprintf(label, sizeof(label), "P%d", index + 1);
+        draw_text((float)x + 10.0f, (float)y + 24.0f, 1.8f, label);
+    }
     if (my_id == index + 1)
     {
         glColor3f(0.68f, 0.91f, 1.0f);
-        draw_text((float)x + 3.0f, (float)y - 14.0f, 1.1f, "YOU");
+        draw_text((float)x + 11.0f, (float)y - 42.0f, 1.1f, "YOU");
     }
 }
 
@@ -160,7 +238,8 @@ static const char *phase_name(int phase)
     }
 }
 
-static void draw_arena(const GameState *state, bool has_state, int player_id)
+static void draw_arena(const GameState *state, bool has_state, int player_id,
+                       const int facing[MAX_PLAYERS], GLuint cat_east, GLuint cat_west)
 {
     glClearColor(0.035f, 0.055f, 0.095f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -171,10 +250,18 @@ static void draw_arena(const GameState *state, bool has_state, int player_id)
     glColor3f(0.13f, 0.19f, 0.28f);
     draw_rect(0.0f, HUD_H - 2.0f, ARENA_W, 2.0f);
     glColor3f(0.10f, 0.14f, 0.21f);
+    glBegin(GL_LINES);
     for (int x = 20; x < ARENA_W; x += 40)
-        draw_rect((float)x, (float)HUD_H, 1.0f, ARENA_H - HUD_H);
+    {
+        glVertex2f((float)x, (float)HUD_H);
+        glVertex2f((float)x, (float)ARENA_H);
+    }
     for (int y = HUD_H + 20; y < ARENA_H; y += 40)
-        draw_rect(0.0f, (float)y, ARENA_W, 1.0f);
+    {
+        glVertex2f(0.0f, (float)y);
+        glVertex2f((float)ARENA_W, (float)y);
+    }
+    glEnd();
 
     glColor3f(0.43f, 0.88f, 0.92f);
     draw_text(24.0f, 20.0f, 2.1f, "COIN RUSH");
@@ -221,7 +308,7 @@ static void draw_arena(const GameState *state, bool has_state, int player_id)
     }
 
     for (int i = 0; i < MAX_PLAYERS; ++i)
-        draw_player(state, i, player_id);
+        draw_player(state, i, player_id, facing[i], cat_east, cat_west);
 
     if (state->phase == 2)
     {
@@ -309,6 +396,7 @@ static void *dds_worker(void *unused)
     request.client_token = client_token;
     uint64_t last_join_request = 0;
     int player_id = 0;
+    char last_sent_direction = 'n';
 
     while (1)
     {
@@ -347,10 +435,16 @@ static void *dds_worker(void *unused)
         }
         else
         {
-            Input input = {0};
-            input.int_player_id = player_id;
-            input.ch_direction = direction;
-            dds_write(input_writer, &input);
+            /* Repeat held movement to keep the server's input timeout alive,
+             * but send idle/release only once instead of 100 no-op messages/s. */
+            if (direction != 'n' || last_sent_direction != 'n')
+            {
+                Input input = {0};
+                input.int_player_id = player_id;
+                input.ch_direction = direction;
+                dds_write(input_writer, &input);
+                last_sent_direction = direction;
+            }
         }
 
         dds_return_t rc = dds_take(state_reader, state_samples, state_info, 1, 1);
@@ -358,6 +452,14 @@ static void *dds_worker(void *unused)
         {
             GameState *incoming = (GameState *)state_samples[0];
             pthread_mutex_lock(&g_mutex);
+            if (g_client.has_state)
+                for (int i = 0; i < MAX_PLAYERS; ++i)
+                {
+                    if (incoming->player_x[i] < g_client.state.player_x[i])
+                        g_player_facing[i] = -1;
+                    else if (incoming->player_x[i] > g_client.state.player_x[i])
+                        g_player_facing[i] = 1;
+                }
             g_client.state = *incoming;
             g_client.has_state = true;
             pthread_mutex_unlock(&g_mutex);
@@ -376,7 +478,7 @@ static void *dds_worker(void *unused)
 
 int main(void)
 {
-    configure_wslg_renderer();
+    bool software_renderer = configure_wslg_renderer();
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
     {
@@ -390,6 +492,7 @@ int main(void)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_FALSE);
+    glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
     GLFWwindow *window = glfwCreateWindow(ARENA_W, ARENA_H, "Coin Rush | Player Client", NULL, NULL);
     if (!window)
     {
@@ -399,7 +502,9 @@ int main(void)
     }
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
+    /* The WSLg software path renders at half refresh (30 FPS on 60 Hz) to
+     * avoid missed vblank deadlines and reduce CPU spikes across clients. */
+    glfwSwapInterval(software_renderer ? 2 : 1);
     int framebuffer_width = 0;
     int framebuffer_height = 0;
     glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
@@ -410,6 +515,13 @@ int main(void)
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    /* The provided rotation set is 64x64 transparent PNGs. The raw RGBA
+     * copies avoid a runtime PNG dependency in the WSL build. */
+    GLuint cat_east = load_cat_texture("east");
+    GLuint cat_west = load_cat_texture("west");
 
     const GLubyte *gl_version = glGetString(GL_VERSION);
     const GLubyte *gl_renderer = glGetString(GL_RENDERER);
@@ -462,15 +574,22 @@ int main(void)
         GameState state = g_client.state;
         bool has_state = g_client.has_state;
         int player_id = g_client.player_id;
+        int facing[MAX_PLAYERS];
+        memcpy(facing, g_player_facing, sizeof(facing));
         pthread_mutex_unlock(&g_mutex);
 
         glLoadIdentity();
-        draw_arena(&state, has_state, player_id);
-        GLenum gl_error = glGetError();
-        if (gl_error != GL_NO_ERROR && !gl_error_reported)
+        draw_arena(&state, has_state, player_id, facing, cat_east, cat_west);
+        if (!gl_error_reported)
         {
-            fprintf(stderr, "OpenGL draw error: 0x%04x\n", (unsigned int)gl_error);
-            gl_error_reported = true;
+            GLenum gl_error = glGetError();
+            if (gl_error != GL_NO_ERROR)
+            {
+                fprintf(stderr, "OpenGL draw error: 0x%04x\n", (unsigned int)gl_error);
+                gl_error_reported = true;
+            }
+            else
+                gl_error_reported = true;
         }
         if (!render_probe_reported)
         {
@@ -491,6 +610,10 @@ int main(void)
     g_client.running = false;
     pthread_mutex_unlock(&g_mutex);
     pthread_join(worker, NULL);
+    if (cat_east != 0)
+        glDeleteTextures(1, &cat_east);
+    if (cat_west != 0)
+        glDeleteTextures(1, &cat_west);
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;
