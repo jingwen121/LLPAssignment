@@ -260,15 +260,23 @@ bool net_server_accept(Network *net, int player_id)
         }
 
         *session = (NetSession){.active = true, .owner = net->pending_id,
-                               .session_id = token, .client_token = net->pending_token, .last_seen = net_now()};
+                               .session_id = token, .client_token = net->pending_token,
+                               .identity = net->pending_identity, .last_seen = net_now()};
     }
 
+    if (player_id > 0)
+    {
+        NetAdmission *admission = &net->admissions[net->pending_identity];
+        admission->owner = net->pending_id;
+        admission->room_code = net->pending_room;
+        admission->expires = net_now() + NET_TIMEOUT_NS;
+    }
     JoinResponse response = {.int_player_id = player_id,
         .room_code = net->pending_room, .client_token = net->pending_token};
     if (player_id > 0)
         response.session_id = net->sessions[player_id - 1].session_id;
     memcpy(response.client_id, net->pending_id.v, sizeof(response.client_id));
-    return checked(dds_write(net->response, &response), "Send join reply");
+    return checked(dds_write(net->replies[net->pending_identity], &response), "Send join reply");
 }
 
 NetEvent net_server_expire(Network *net)
@@ -278,6 +286,9 @@ NetEvent net_server_expire(Network *net)
     {
         if (net->sessions[i].active && now - net->sessions[i].last_seen >= NET_TIMEOUT_NS)
         {
+            GameState retired = {.room_code = net->room_code};
+            checked(dds_unregister_instance(net->states[net->sessions[i].identity], &retired),
+                    "Expire private room state");
             net->sessions[i].active = false;
             return (NetEvent){NET_LEAVE, i + 1, 'q'};
         }
@@ -300,6 +311,39 @@ bool net_server_join(Network *net, const JoinRequest *request, const dds_sample_
         return false;
     }
 
+    // Topic permission binds the request to a certificate identity; never use
+    // a claimed player ID or a freely chosen participant GUID as the quota key
+    dds_builtintopic_endpoint_t *publication =
+        dds_get_matched_publication_data(net->join, info->publication_handle);
+    if (!publication) return false;
+    int identity = -1;
+    for (int i = 0; i < NET_IDENTITIES; ++i)
+    {
+        char topic[48];
+        snprintf(topic, sizeof(topic), "JoinRequest_client%d", i + 1);
+        if (strcmp(publication->topic_name, topic) == 0) identity = i;
+    }
+    dds_builtintopic_free_endpoint(publication);
+    if (identity < 0) return false;
+    NetAdmission *admission = &net->admissions[identity];
+    int64_t now = net_now();
+    if (net->room_code == 0)
+    {
+        // 5 attempts per second includes retries and failed room-code guesses
+        if (now < admission->next_join)
+        {
+            ++net->rejected;
+            return false;
+        }
+        admission->next_join = now + INT64_C(200000000);
+    }
+    if (admission->expires > now &&
+        (admission->room_code != request->room_code || !same_id(&admission->owner, &owner)))
+    {
+        ++net->rejected;
+        return false;
+    }
+    net->pending_identity = identity;
     net->pending_id = owner;
     net->pending_room = request->room_code;
     net->pending_token = request->client_token;
@@ -317,7 +361,7 @@ bool net_server_join(Network *net, const JoinRequest *request, const dds_sample_
                 .session_id = net->sessions[i].session_id,
                 .room_code = request->room_code, .client_token = request->client_token};
             memcpy(response.client_id, owner.v, sizeof(response.client_id));
-            checked(dds_write(net->response, &response), "Resend join reply");
+            checked(dds_write(net->replies[identity], &response), "Resend join reply");
             return false;
         }
     }
@@ -348,9 +392,14 @@ NetEvent net_server_input(Network *net, const Input *input, const dds_sample_inf
     // Consume the sequence even when a movement exceeds the rate limit
     session->seq = input->seq;
     session->last_seen = now;
+    net->admissions[session->identity].expires = now + NET_TIMEOUT_NS;
     if (input->ch_direction == 'q')
     {
+        GameState retired = {.room_code = net->room_code};
+        checked(dds_unregister_instance(net->states[session->identity], &retired),
+                "Leave private room state");
         session->active = false;
+        net->admissions[session->identity].expires = 0;
         return (NetEvent){NET_LEAVE, input->int_player_id, 'q'};
     }
     if (input->ch_direction == 'n')
@@ -380,7 +429,9 @@ NetEvent net_server_poll(Network *net)
     }
 
     JoinRequest request;
-    if (take(net->join, &request, &info) && net_server_join(net, &request, &info))
+    void *samples[] = {&request};
+    if (net_server_take_join(net, samples, &info, 1, 1) == 1 &&
+        net_server_join(net, &request, &info))
         return (NetEvent){NET_JOIN, 0, 0};
     return (NetEvent){0};
 }
@@ -389,13 +440,16 @@ bool net_server_state(Network *net, GameState *state)
 {
     // Give each complete snapshot a seq so clients can discard old state
     state->seq = ++net->state_sequence;
-    return checked(dds_write(net->state, state), "Send game state");
+    bool ok = true;
+    for (int i = 0; i < NET_PLAYERS; ++i)
+        if (net->sessions[i].active)
+            ok = checked(dds_write(net->states[net->sessions[i].identity], state),
+                         "Send private game state") && ok;
+    return ok;
 }
 
-bool net_client_send(Network *net, char direction)
+static void expire_client(Network *net, int64_t now)
 {
-    int64_t now = net_now();
-
     if (now - net->last_state >= NET_TIMEOUT_NS)
     {
         // Clear the old server after a timeout and start joining again
@@ -404,6 +458,13 @@ bool net_client_send(Network *net, char direction)
         net->server_id = (dds_guid_t){0};
         net->state_sequence = 0;
     }
+}
+
+bool net_client_send(Network *net, char direction)
+{
+    int64_t now = net_now();
+
+    expire_client(net, now);
 
     if (net->player_id == -1)
     {
@@ -472,6 +533,9 @@ void net_client_room(Network *net, int32_t room_code, bool create_room, uint64_t
 
 bool net_client_state(Network *net, GameState *state)
 {
+    // An expired admission no longer receives private state; detect that silence
+    // even while input sending is paused
+    expire_client(net, net_now());
     JoinResponse response;
     dds_sample_info_t info;
     dds_guid_t owner;
