@@ -11,6 +11,7 @@
 #define NET_COINS 8
 #define NET_DOMAIN 42
 #define NET_ROOMS 8
+#define NET_IDENTITIES 6
 
 // These are monotonic nanoseconds; neither timeout depends on the wall clock
 // The server applies the movement limit even if a client removes its own limiter
@@ -37,6 +38,7 @@ typedef struct
     // Ownership survives a retry, but a new admission must not reuse an old token
     uint64_t session_id;
     uint64_t client_token;
+    int identity;
 
     // Save the last accepted input so older inputs cannot be replayed
     uint64_t seq;
@@ -46,6 +48,16 @@ typedef struct
     int64_t last_move;
 } NetSession;
 
+// Shared by room copies; limits follow the signed identity rather than a process
+// A new participant using the same certificate does not get a fresh quota
+typedef struct
+{
+    dds_guid_t owner;
+    int32_t room_code;
+    int64_t expires;
+    int64_t next_join;
+} NetAdmission;
+
 typedef struct
 {
     dds_entity_t participant;
@@ -54,6 +66,14 @@ typedef struct
     dds_entity_t input;
     dds_entity_t state;
     dds_guid_t own_id;
+    dds_entity_t join_readers[NET_IDENTITIES];
+    dds_entity_t replies[NET_IDENTITIES];
+    dds_entity_t states[NET_IDENTITIES];
+    unsigned next_reader;
+    int identity;
+    int pending_identity;
+    NetAdmission admission_storage[NET_IDENTITIES];
+    NetAdmission *admissions;
 
     // Accept state only from the server that assigned this client's player ID
     dds_guid_t server_id;
@@ -107,6 +127,9 @@ NetEvent net_server_poll(Network *net);
 NetEvent net_server_expire(Network *net);
 bool net_server_join(Network *net, const JoinRequest *request, const dds_sample_info_t *info);
 NetEvent net_server_input(Network *net, const Input *input, const dds_sample_info_t *info);
+dds_return_t net_server_take_join(Network *net, void **samples,
+    dds_sample_info_t *info, size_t size, uint32_t count);
+void net_server_retire(Network *net, const GameState *state);
 bool net_server_accept(Network *net, int player_id);
 bool net_server_state(Network *net, GameState *state);
 

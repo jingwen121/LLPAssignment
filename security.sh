@@ -67,11 +67,11 @@ for role in server client1 client2 client3 client4 client5 client6; do
 
     # Client code cannot grant itself a GameState writer; Cyclone checks the
     # signed grant before creating that endpoint; unknown topics default to DENY
-    publish='<topic>JoinRequest</topic><topic>Input</topic>'
-    subscribe='<topic>JoinResponse</topic><topic>GameState</topic>'
+    publish="<topic>JoinRequest_${role}</topic><topic>Input</topic>"
+    subscribe="<topic>JoinResponse_${role}</topic><topic>GameState_${role}</topic>"
     if [[ "$role" == server ]]; then
-        publish='<topic>JoinResponse</topic><topic>GameState</topic>'
-        subscribe='<topic>JoinRequest</topic><topic>Input</topic>'
+        publish='<topic>JoinResponse_client?</topic><topic>GameState_client?</topic>'
+        subscribe='<topic>JoinRequest_client?</topic><topic>Input</topic>'
     fi
 
     # Use the exact certificate subject when granting access to each identity

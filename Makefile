@@ -1,7 +1,7 @@
 CC = gcc
 CPPFLAGS += -Ibuild $(shell pkg-config --cflags CycloneDDS glfw3)
 CFLAGS = -std=c11 -D_DEFAULT_SOURCE -O2 -g -Wall -Wextra -Wpedantic
-DDS_LIBS = $(shell pkg-config --libs CycloneDDS) -pthread
+DDS_LIBS = $(shell pkg-config --libs CycloneDDS) -pthread -lcrypto
 SANFLAGS = -std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: all test qa test-sanitize profile wire loss
@@ -27,7 +27,7 @@ build/test_game: test_game.c game.c game.h | build
 
 test: build/test_validation build/test_game
 	./build/test_game
-	./build/test_validation credentials
+	./build/test_validation credentials-private
 
 # Run security and networking checks
 qa: all

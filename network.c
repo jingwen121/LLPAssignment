@@ -6,6 +6,8 @@
 #include <time.h>
 #include <sys/random.h>
 #include <unistd.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
 
 int64_t net_now(void)
 {
@@ -84,6 +86,26 @@ bool net_participant(Network *net, bool server, const char *credentials)
     memset(net, 0, sizeof(*net));
     net->server = server;
     net->player_id = -1;
+    net->admissions = net->admission_storage;
+
+    // The certificate chooses the channel; the signed DDS grant enforces it
+    // Renaming a credential directory cannot grant another client's topic rights
+    char cert_path[4096], subject[32] = {0};
+    int length = snprintf(cert_path, sizeof(cert_path), "%s/identity.pem", credentials);
+    if (length < 0 || (size_t)length >= sizeof(cert_path))
+        return false;
+    FILE *file = fopen(cert_path, "r");
+    X509 *cert = file ? PEM_read_X509(file, NULL, NULL, NULL) : NULL;
+    if (file) fclose(file);
+    if (!cert) return false;
+    X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName,
+                             subject, sizeof(subject));
+    X509_free(cert);
+    if (server ? strcmp(subject, "server") != 0 :
+        (strlen(subject) != 7 || strncmp(subject, "client", 6) != 0 ||
+         subject[6] < '1' || subject[6] > '6'))
+        return false;
+    net->identity = server ? 0 : subject[6] - '1';
 
     dds_qos_t *qos = dds_create_qos();
     if (!qos)
@@ -135,13 +157,24 @@ bool net_open(Network *net, bool server, const char *credentials)
     // Joins and input use reliable delivery with a finite writer blocking time
     // Snapshots use best effort and depth 1; receiving a fresh complete state is
     // more useful than retransmitting positions that have already been replaced
-    net->join = endpoint(net, &JoinRequest_desc, "JoinRequest", !server, true, 32);
-    net->response = endpoint(net, &JoinResponse_desc, "JoinResponse", server, true, 32);
+    for (int i = 0; i < NET_IDENTITIES; ++i)
+    {
+        if (!server && i != net->identity) continue;
+        char name[48];
+        snprintf(name, sizeof(name), "JoinRequest_client%d", i + 1);
+        net->join_readers[i] = endpoint(net, &JoinRequest_desc, name, !server, true, 8);
+        snprintf(name, sizeof(name), "JoinResponse_client%d", i + 1);
+        net->replies[i] = endpoint(net, &JoinResponse_desc, name, server, true, 8);
+        snprintf(name, sizeof(name), "GameState_client%d", i + 1);
+        net->states[i] = endpoint(net, &GameState_desc, name, server, false, 1);
+        if (net->join_readers[i] < 0 || net->replies[i] < 0 || net->states[i] < 0)
+            goto fail;
+    }
+    net->join = net->join_readers[net->identity];
+    net->response = net->replies[net->identity];
+    net->state = net->states[net->identity];
     net->input = endpoint(net, &Input_desc, "Input", !server, true, 32);
-    net->state = endpoint(net, &GameState_desc, "GameState", server, false, 1);
-
-    if (net->join < 0 || net->response < 0 || net->input < 0 || net->state < 0)
-        goto fail;
+    if (net->input < 0) goto fail;
 
     return true;
 
@@ -172,6 +205,30 @@ static bool take(dds_entity_t reader, void *sample, dds_sample_info_t *info)
     if (count < 0)
         checked(count, "Read DDS sample");
     return count == 1 && info->valid_data;
+}
+
+dds_return_t net_server_take_join(Network *net, void **samples,
+    dds_sample_info_t *info, size_t size, uint32_t count)
+{
+    // Round-robin queues prevent 1 signed identity monopolising all join reads
+    for (unsigned n = 0; n < NET_IDENTITIES; ++n)
+    {
+        unsigned i = net->next_reader++ % NET_IDENTITIES;
+        net->join = net->join_readers[i];
+        dds_return_t result = dds_take(net->join, samples, info, size, count);
+        if (result != 0) return result;
+    }
+    return 0;
+}
+
+void net_server_retire(Network *net, const GameState *state)
+{
+    // Disposal messages contain room keys too; send them only on channels that
+    // belonged to this room, never to every credential on the server
+    for (int i = 0; i < NET_PLAYERS; ++i)
+        if (net->sessions[i].session_id != 0)
+            checked(dds_unregister_instance(net->states[net->sessions[i].identity], state),
+                    "Retire private room state");
 }
 
 bool net_server_accept(Network *net, int player_id)

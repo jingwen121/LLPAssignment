@@ -193,7 +193,7 @@ def profile():
     busy = WORK / "server-busy"
     run(["gcc", "-std=c11", "-D_DEFAULT_SOURCE", "-O2", "-g", "-Wall", "-Wextra",
          "-Wpedantic", "-I.", "-Ibuild", busy_source, "game.c", "network.c", "build/messages.c",
-         "-o", busy, *flags, "-pthread"], "profile-build.log")
+         "-o", busy, *flags, "-pthread", "-lcrypto"], "profile-build.log")
 
     results = {}
     for label, binary in (("busy_poll_control", busy), ("bounded_poll", "./build/server")):
