@@ -8,3 +8,4 @@
 *.o
 /core
 /core.*
+/credentials-local/
