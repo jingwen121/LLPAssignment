@@ -23,20 +23,6 @@ static bool rects_overlap(int ax, int ay, int aw, int ah,
            ay < by + bh && by < ay + ah;
 }
 
-/* Server-auth: Would player i overlap another player if moved to x?
-   Used so players cannot walk through each other. */
-static bool player_hits_other(const Game *g, int i, int x)
-{
-    for (int j = 0; j < MAX_PLAYERS; j++)
-    {
-        if (j == i || !g->players[j].active)
-            continue;
-        if (rects_overlap(x, PLAYER_Y, PLAYER_W, PLAYER_H, g->players[j].x, PLAYER_Y, PLAYER_W, PLAYER_H))
-            return true;
-    }
-    return false;
-}
-
 static int count_gold(const Game *g)
 {
     int n = 0;
@@ -114,11 +100,7 @@ static void move_players(Game *g, uint64_t now_ms)
         if (nx < 0)                nx = 0;
         if (nx > WIDTH - PLAYER_W) nx = WIDTH - PLAYER_W;
 
-        /* Block the move if it walks into another player.
-         * (If already overlapping, e.g. after a join, allow moving apart.) */
-        if (player_hits_other(g, i, nx) && !player_hits_other(g, i, p->x))
-            continue;
-
+        /* Players share a lane and may walk through one another. */
         p->x = nx;
     }
 }

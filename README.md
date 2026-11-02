@@ -37,6 +37,8 @@ Clients must be able to discover the same Cyclone DDS server on the network.
 ## Controls
 
 - Use the left/right arrow keys or A/D to move.
+- Resize the client window freely; the arena keeps its 4:3 layout and adds
+  letterboxing rather than stretching or cropping the game.
 - In the room-code screen, type six digits, press Enter to join, Backspace to
   edit, or Escape to return to the main menu.
 - Use **Exit Game** in the main menu, or press Escape during a match, to open
@@ -56,5 +58,7 @@ Clients must be able to discover the same Cyclone DDS server on the network.
   each player has a separate tint and faces left or right as they move.
 - The HUD, falling coins, scores, timer and player positions use the latest
   authoritative room snapshot from the server.
+- Players can pass through one another. Coins are clipped to the playfield below
+  the HUD, including after the window is resized.
 - On WSLg, the client uses Mesa software OpenGL with two worker threads and
   synchronized frame swaps to avoid the Intel Arc D3D12 black-frame issue.
