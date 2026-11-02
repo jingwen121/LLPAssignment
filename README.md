@@ -10,7 +10,7 @@ Install dependencies once:
 
 ```sh
 sudo apt update
-sudo apt install build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev
+sudo apt install build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev libssl-dev
 ```
 
 From the project directory, build both executables with one command:
@@ -24,13 +24,13 @@ This generates the DDS message code from `messages.idl`, then creates the
 
 ## Start a match
 
-Generate credentials once with `bash security.sh credentials`; give each player
+Generate credentials once with `bash security.sh credentials-private`; give each player
 only their own client directory and keep the authority and server keys private.
 
-1. In one WSL terminal, run `./build/server credentials/server`.
-2. In a second terminal, run `./build/client credentials/client1` and choose **Play - Create Room**.
+1. In one WSL terminal, run `./build/server credentials-private/server`.
+2. In a second terminal, run `./build/client credentials-private/client1` and choose **Play - Create Room**.
 3. Share the six-digit room code shown in the lobby.
-4. Other players run `./build/client credentials/client2` with their own credential directory, choose **Join a Room**, enter the code and
+4. Other players run `./build/client credentials-private/client2` with their own credential directory, choose **Join a Room**, enter the code and
    press Enter (or click **Join Room**).
 
 The server supports up to eight rooms with up to five players in each room.
@@ -40,6 +40,7 @@ Clients must be able to discover the same Cyclone DDS server on the network.
 ## Controls
 
 - Use the left/right arrow keys or A/D to move.
+- Press F11 to enter or leave fullscreen; Escape still opens the in-game exit menu.
 - Resize the client window freely; the arena keeps its 4:3 layout and adds
   letterboxing rather than stretching or cropping the game.
 - In the room-code screen, type six digits, press Enter to join, Backspace to
@@ -65,3 +66,13 @@ Clients must be able to discover the same Cyclone DDS server on the network.
   the HUD, including after the window is resized.
 - On WSLg, the client uses Mesa software OpenGL with two worker threads and
   synchronized frame swaps to avoid the Intel Arc D3D12 black-frame issue.
+
+Secure channels use the certificate identities client1 through client6; each
+identity may hold 1 active player slot across all rooms and attempt at most
+5 joins per second. Give each player a distinct credential directory.
+
+After updating from shared DDS topics, generate a new credential set in a new
+folder with `bash security.sh credentials-private`; old signed permissions cannot
+access the private channels. Start the server with
+`./build/server credentials-private/server` and each client with its corresponding
+`./build/client credentials-private/client1` directory. Keep the authority private.
