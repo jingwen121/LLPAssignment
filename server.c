@@ -79,41 +79,14 @@ static bool create_dds_entities(Network *net, const char *credentials,
                                 dds_entity_t *input_reader,
                                 dds_entity_t *state_writer)
 {
-    if (!net_participant(net, true, credentials))
+    if (!net_open(net, true, credentials))
         return false;
     *participant = net->participant;
-
-    dds_entity_t join_topic = dds_create_topic(*participant, &JoinRequest_desc,
-                                                "JoinRequest", NULL, NULL);
-    dds_entity_t response_topic = dds_create_topic(*participant, &JoinResponse_desc,
-                                                   "JoinResponse", NULL, NULL);
-    dds_entity_t input_topic = dds_create_topic(*participant, &Input_desc,
-                                                 "Input", NULL, NULL);
-    dds_entity_t state_topic = dds_create_topic(*participant, &GameState_desc,
-                                                 "GameState", NULL, NULL);
-    if (join_topic < 0 || response_topic < 0 || input_topic < 0 || state_topic < 0)
-        return false;
-
-    dds_qos_t *qos = dds_create_qos();
-    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 64);
-    // Reliable admission and intent share a bounded queue; snapshots keep only
-    // the latest update per room so another room cannot replace their history
-    dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_MSECS(100));
-    dds_qset_resource_limits(qos, 64, 1, 64);
-    *join_reader = dds_create_reader(*participant, join_topic, qos, NULL);
-    *input_reader = dds_create_reader(*participant, input_topic, qos, NULL);
-    *response_writer = dds_create_writer(*participant, response_topic, qos, NULL);
-    dds_qset_history(qos, DDS_HISTORY_KEEP_LAST, 1);
-    dds_qset_resource_limits(qos, MAX_ROOMS, MAX_ROOMS, 1);
-    dds_qset_reliability(qos, DDS_RELIABILITY_BEST_EFFORT, DDS_MSECS(100));
-    *state_writer = dds_create_writer(*participant, state_topic, qos, NULL);
-    dds_delete_qos(qos);
-    net->join = *join_reader;
-    net->response = *response_writer;
-    net->input = *input_reader;
-    net->state = *state_writer;
-    return *join_reader >= 0 && *input_reader >= 0 &&
-           *response_writer >= 0 && *state_writer >= 0;
+    *join_reader = net->join;
+    *response_writer = net->response;
+    *input_reader = net->input;
+    *state_writer = net->state;
+    return true;
 }
 
 static void fill_game_state(GameState *out, const Room *room)
@@ -178,7 +151,7 @@ static void *dds_worker(void *credentials)
 
     for (;;)
     {
-        dds_return_t count = dds_take(join_reader, join_samples, join_info,
+        dds_return_t count = net_server_take_join(&net, join_samples, join_info,
                                       MAX_BATCH, MAX_BATCH);
         if (count < 0)
             fprintf(stderr, "Join read failed: %s\n", dds_strretcode(-count));
@@ -222,6 +195,7 @@ static void *dds_worker(void *credentials)
 
                 // Retry replies come from the room's GUID-bound session; a matching
                 // client token alone must never recover somebody else's slot
+                room->network.join = net.join;
                 if (!net_server_join(&room->network, request, &join_info[n]))
                 {
                     pthread_mutex_unlock(&g_rooms_mutex);
@@ -277,7 +251,7 @@ static void *dds_worker(void *credentials)
                     {
                         // Release the keyed DDS instance before reusing this room slot
                         GameState empty = {.room_code = room->code};
-                        dds_unregister_instance(state_writer, &empty);
+                        net_server_retire(&room->network, &empty);
                         room->active = false;
                         last_sent_tick[room_index] = UINT32_MAX;
                     }
@@ -308,7 +282,7 @@ static void *dds_worker(void *credentials)
             if (game_num_active(&g_rooms[i].game) == 0)
             {
                 GameState empty = {.room_code = g_rooms[i].code};
-                dds_unregister_instance(state_writer, &empty);
+                net_server_retire(&g_rooms[i].network, &empty);
                 g_rooms[i].active = false;
                 last_sent_tick[i] = UINT32_MAX;
             }
@@ -327,8 +301,8 @@ static void *dds_worker(void *credentials)
             GameState state;
             fill_game_state(&state, &snapshot[i]);
             // Keep sequences local to each room so other rooms do not look like loss
-            state.seq = ++g_rooms[i].network.state_sequence;
-            dds_return_t rc = dds_write(state_writer, &state);
+            dds_return_t rc = net_server_state(&g_rooms[i].network, &state) ?
+                DDS_RETCODE_OK : DDS_RETCODE_ERROR;
             if (rc < 0)
                 fprintf(stderr, "State publish failed: %s\n", dds_strretcode(-rc));
         }
@@ -339,7 +313,7 @@ static void *dds_worker(void *credentials)
 
 int main(int argc, char **argv)
 {
-    const char *credentials = argc > 1 ? argv[1] : "credentials/server";
+    const char *credentials = argc > 1 ? argv[1] : "credentials-private/server";
     setvbuf(stdout, NULL, _IOLBF, 0);
     srand((unsigned int)time(NULL));
     pthread_t worker;
@@ -351,7 +325,6 @@ int main(int argc, char **argv)
     printf("Coin Rush room server ready (up to %d rooms, %d players each).\n",
            MAX_ROOMS, MAX_PLAYERS);
 
-    uint64_t last_status = 0;
     for (;;)
     {
         uint64_t now = now_ms();
@@ -359,15 +332,6 @@ int main(int argc, char **argv)
         for (int i = 0; i < MAX_ROOMS; ++i)
             if (g_rooms[i].active)
                 game_tick(&g_rooms[i].game, now);
-        if (now - last_status >= 1000)
-        {
-            last_status = now;
-            for (int i = 0; i < MAX_ROOMS; ++i)
-                if (g_rooms[i].active)
-                    printf("Room %06d: %d player(s), phase %d, %ds left\n",
-                           (int)g_rooms[i].code, game_num_active(&g_rooms[i].game),
-                           (int)g_rooms[i].game.phase, g_rooms[i].game.time_left);
-        }
         pthread_mutex_unlock(&g_rooms_mutex);
         dds_sleepfor(DDS_MSECS(TICK_MS));
     }
