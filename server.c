@@ -58,6 +58,7 @@ int int_new_player_id = -1;
 */
 // Table to track clients
 static Game g_game;
+static uint64_t g_client_tokens[MAX_PLAYERS];
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Current time in milliseconds, used by the game logic:
@@ -105,11 +106,11 @@ void *worker(void *arg)
 	dds_entity_t participant;
 	dds_entity_t join_topic;
 	dds_entity_t response_topic;
-	dds_entity_t position_topic;
+	dds_entity_t state_topic;
 	dds_entity_t input_topic;
 	dds_entity_t join_reader;
 	dds_entity_t response_writer;
-	dds_entity_t position_writer;
+	dds_entity_t state_writer;
 	dds_entity_t input_reader;
 		
 	//Pointer to unknown type
@@ -159,11 +160,11 @@ void *worker(void *arg)
         NULL
     );
 	
-	position_topic = dds_create_topic
+	state_topic = dds_create_topic
 	(
         participant,
-        &Position_desc,
-        "Position",
+        &GameState_desc,
+        "GameState",
         NULL,
         NULL
     );
@@ -222,9 +223,9 @@ void *worker(void *arg)
         NULL
     );
 	
-	position_writer = dds_create_writer(
+	state_writer = dds_create_writer(
         participant,
-        position_topic,
+		state_topic,
         NULL,
         NULL
     );
@@ -237,8 +238,8 @@ void *worker(void *arg)
 	// Create a Join Response
 	JoinResponse response;
 	
-	// Create a Position
-	Position position;
+	// One complete snapshot keeps player, coin and HUD values in sync.
+	GameState state;
 	
 	// Last game tick we sent.
 	// the game changes 60 times a second; checking the tick number
@@ -256,17 +257,32 @@ void *worker(void *arg)
 		{
 			if (!infos_join[0].valid_data)
 				continue;
+			JoinRequest *request = (JoinRequest *)samples_join[0];
+			uint64_t token = request->client_token;
 			printf("Join request received\n");
 
 			// Ask the game logic for a player ID (0 = game full).
 			// Lock only for this one call, so the game loop is never
 			// blocked while we do network work.
 			pthread_mutex_lock(&mutex);
-			int new_id = game_add_player(&g_game);
+			int new_id = 0;
+			for (int i = 0; i < MAX_PLAYERS; ++i)
+				if (g_game.players[i].active && g_client_tokens[i] == token)
+				{
+					new_id = i + 1; /* A retry from this client reuses its slot. */
+					break;
+				}
+			if (new_id == 0)
+			{
+				new_id = game_add_player(&g_game);
+				if (new_id > 0)
+					g_client_tokens[new_id - 1] = token;
+			}
 			pthread_mutex_unlock(&mutex);
 
 			// Send the reply AFTER unlocking.
 			// dds_write can take time; never hold the lock during it.
+			response.client_token = token;
 			response.int_player_id = new_id;
 			rc = dds_write(response_writer, &response);
 			if (rc != DDS_RETCODE_OK)
@@ -303,7 +319,7 @@ void *worker(void *arg)
 		if (rc < 0)
 			DDS_FATAL("dds_take: %s\n", dds_strretcode(-rc));
 
-		//  3. Send positions after each game tick 
+		//  3. Send one complete snapshot after each game tick.
 		// Copy the game while locked, then send WITHOUT holding the lock.
 		// the baseline slept 20 ms per player WHILE locked, so one
 		// broadcast to 5 players blocked the other thread for ~100 ms.
@@ -320,27 +336,34 @@ void *worker(void *arg)
 			// Remember which tick we sent, so we don't send it again
 			last_sent_tick = snapshot.tick;
 
-			// Send one Position message per player in the game
+			memset(&state, 0, sizeof(state));
+			state.tick = snapshot.tick;
+			state.phase = (int32_t)snapshot.phase;
+			state.time_left = (int32_t)snapshot.time_left;
+			state.winners = (int32_t)snapshot.winners;
+			state.best_score = (int32_t)snapshot.best_score;
+
 			for (int i = 0; i < MAX_PLAYERS; i++)
 			{
-				// Skip empty slots (no player has this ID)
-				if (!snapshot.players[i].active)
-					continue;
-
-				// Fill in the message from the SNAPSHOT, not g_game.
-				// we are not holding the lock here; reading g_game
-				// directly could see it half-updated by the game loop.
-				// Player ID = array index + 1 (IDs are 1..5, index is 0..4)
-				position.int_player_id = i + 1;
-				position.int_x = snapshot.players[i].x;
-				position.int_y = snapshot.players[i].y;
-
-				// Send to all clients. No sleep and no lock held, unlike
-				// the baseline (which slept 20 ms per player while locked).
-				rc = dds_write(position_writer, &position);
-				if (rc != DDS_RETCODE_OK)
-					DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+				state.player_active[i] = snapshot.players[i].active;
+				state.player_x[i] = snapshot.players[i].x;
+				state.player_y[i] = snapshot.players[i].y;
+				state.player_score[i] = snapshot.players[i].score;
 			}
+			for (int i = 0; i < MAX_COINS; i++)
+			{
+				state.coin_active[i] = snapshot.coins[i].active;
+				state.coin_gold[i] = snapshot.coins[i].gold;
+				state.coin_x[i] = snapshot.coins[i].x;
+				state.coin_y[i] = snapshot.coins[i].y;
+				state.coin_size[i] = snapshot.coins[i].size;
+			}
+
+			// Publish exactly one sample for this simulation tick.
+			rc = dds_write(state_writer, &state);
+			if (rc != DDS_RETCODE_OK)
+				DDS_FATAL("dds_write: %s\n", dds_strretcode(-rc));
+
 		}
 		//Optimazation
 		// Short sleep so this thread doesn't spin at 100% CPU.
