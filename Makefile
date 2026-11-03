@@ -10,14 +10,26 @@ DDS_LIBS = $(CYCLONE_LIBS) -pthread $(OPENSSL_LIBS)
 EFFECT_ASSETS = assets/effects/bomb_spritesheet.rgba assets/effects/plus_spritesheet.rgba assets/effects/colored_hearts.rgba
 SANFLAGS = -std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all clean check-deps credentials run test qa test-sanitize profile wire loss
+.PHONY: all server client clean check-deps credentials run run-player2 test qa test-sanitize profile wire loss
 
 # `make` prepares a runnable local build. `make run` also starts a local server
 # and opens the first client; use separate build/server and build/client
 # commands when hosting a network game with multiple client identities.
 all: check-deps
-	$(MAKE) --no-print-directory build/server build/client credentials
+	$(MAKE) --no-print-directory build/server build/client credentials server client
 	@echo 'Build ready. Launch the local game with: make run'
+
+# Keep the familiar ./server and ./client commands as copies of the build.
+# A no-argument client selects the first locally unlocked signed identity.
+server: build/server
+	@tmp=$$(mktemp ./.server.install.XXXXXX); \
+	  trap 'rm -f "$$tmp"' EXIT; \
+	  cp build/server "$$tmp" && mv -f "$$tmp" server
+
+client: build/client
+	@tmp=$$(mktemp ./.client.install.XXXXXX); \
+	  trap 'rm -f "$$tmp"' EXIT; \
+	  cp build/client "$$tmp" && mv -f "$$tmp" client
 
 check-deps:
 	@if command -v gcc >/dev/null 2>&1 && \
@@ -56,7 +68,8 @@ check-deps:
 
 clean:
 	rm -rf build
-	rm -f messages.c messages.h
+	rm -f messages.c messages.h server client test_validation *.o core core.*
+	rm -f .server.install.* .client.install.*
 
 credentials: security.sh
 	@if test -f credentials-private/server/identity.pem && \
@@ -70,10 +83,15 @@ credentials: security.sh
 	fi
 
 run: all
-	@./build/server credentials-private/server & server_pid=$$!; \
+	@./server & server_pid=$$!; \
 	  trap 'kill "$$server_pid" 2>/dev/null || true; wait "$$server_pid" 2>/dev/null || true' EXIT INT TERM; \
 	  sleep 1; \
-	  ./build/client credentials-private/client1
+	  ./client
+
+# Open this from a second terminal while `make run` is active. The local lock
+# causes its bare client launch to select the next available signed identity.
+run-player2: all
+	./client
 
 build: | check-deps
 	mkdir -p build

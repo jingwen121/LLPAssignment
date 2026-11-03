@@ -266,6 +266,10 @@ static void *dds_worker(void *credentials)
                         last_sent_tick[room_index] = UINT32_MAX;
                     }
                 }
+                else if (event.type == NET_CONTINUE)
+                {
+                    game_continue_level(&room->game, input->int_player_id, now_ms());
+                }
                 else
                 {
                     int direction = input->ch_direction == 'l' ? -1 :

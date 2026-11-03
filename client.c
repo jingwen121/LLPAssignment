@@ -13,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 #include <messages.h>
 #include "network.h"
 #include "stb_easy_font.h"
@@ -66,6 +73,7 @@ typedef struct
     char direction;
     bool running;
     bool join_requested;
+    bool continue_requested;
     bool create_room;
     bool join_failed;
     uint32_t room_code;
@@ -597,9 +605,12 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
 static const char *phase_name(int phase)
 {
     if (phase == 1) return "COIN RUSH";
-    if (phase == 2) return "ROUND COMPLETE";
+    if (phase == 2) return "LEVEL BREAK";
+    if (phase == 3) return "ROUND COMPLETE";
     return "ROOM LOBBY";
 }
+
+static void draw_button(float x, float y, float w, float h, const char *label, bool hovered);
 
 static void draw_arena(const GameState *state, bool has_state, int player_id,
                        uint32_t room_code, const int facing[MAX_PLAYERS],
@@ -639,7 +650,8 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     glColor3f(1.0f, 0.83f, 0.42f);
     snprintf(text, sizeof(text), "TIME  %02d", state->time_left); draw_centered(525, 20, 1.8f, text);
     glColor3f(0.73f, 0.81f, 0.91f);
-    snprintf(text, sizeof(text), "PLAYERS  %d/%d", active_count, MAX_PLAYERS);
+    int shown_capacity = state->phase == 0 ? 2 : MAX_PLAYERS;
+    snprintf(text, sizeof(text), "PLAYERS  %d/%d", active_count, shown_capacity);
     draw_centered(710, 22, 1.2f, text);
 
     if (state->phase == 1 && g_viewport.height > 0)
@@ -652,14 +664,15 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
             if (state->coin_active[i])
                 draw_coin(state->coin_x[i], state->coin_y[i], state->coin_size[i], state->coin_gold[i]);
         for (int i = 0; i < MAX_BOMBS; ++i)
-            draw_bomb(state, i, now);
+            if (state->level >= 2)
+                draw_bomb(state, i, now);
         glDisable(GL_SCISSOR_TEST);
     }
 
     for (int i = 0; i < MAX_PLAYERS; ++i)
     {
         draw_player(state, i, player_id, facing[i], cat_east, cat_west);
-        if (state->player_active[i])
+        if (state->player_active[i] && state->phase == 1 && state->level >= 2)
             draw_lives(state, i);
     }
     if (state->phase == 1)
@@ -679,6 +692,20 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
         draw_centered(ARENA_W * 0.5f, 274, 1.05f, "Share this code with friends to fill the room");
     }
     else if (state->phase == 2)
+    {
+        glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, 150, 500, 290);
+        glColor3f(0.27f, 0.80f, 0.86f); draw_rect(150, 150, 500, 3);
+        glColor3f(0.43f, 0.88f, 0.92f);
+        draw_centered(ARENA_W * 0.5f, 188, 2.2f, "LEVEL 1 COMPLETE");
+        glColor3f(0.88f, 0.93f, 1.0f);
+        draw_centered(ARENA_W * 0.5f, 230, 1.25f, "Your score carries into the next level");
+        glColor3f(1.0f, 0.83f, 0.42f);
+        draw_centered(ARENA_W * 0.5f, 264, 1.2f, "Level 2 adds bombs, faster coins and 3 lives");
+        draw_button(264, 300, 272, 58, "CONTINUE TO LEVEL 2", false);
+        glColor3f(0.57f, 0.68f, 0.81f);
+        draw_centered(ARENA_W * 0.5f, 380, 1.05f, "Press ENTER or click to continue");
+    }
+    else if (state->phase == 3)
     {
         glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, 160, 500, 232);
         glColor3f(0.99f, 0.73f, 0.27f); draw_rect(150, 160, 500, 3);
@@ -843,6 +870,14 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action, 
     { toggle_fullscreen(window); return; }
     if (key == GLFW_KEY_ESCAPE && g_screen == UI_GAME)
     { g_exit_from_game = true; g_screen = UI_EXIT_CONFIRM; return; }
+    if (g_screen == UI_GAME && (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER))
+    {
+        pthread_mutex_lock(&g_mutex);
+        if (g_client.has_state && g_client.state.phase == 2)
+            g_client.continue_requested = true;
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
     if (g_screen == UI_EXIT_CONFIRM)
     {
         if (key == GLFW_KEY_ESCAPE)
@@ -877,6 +912,7 @@ static void *dds_worker(void *credentials)
         // not hold the mutex needed by rendering or keyboard callbacks
         pthread_mutex_lock(&g_mutex);
         bool running = g_client.running, join_requested = g_client.join_requested;
+        bool continue_requested = g_client.continue_requested;
         bool create_room = g_client.create_room;
         char direction = g_client.direction;
         uint32_t room_code = g_client.room_code;
@@ -902,7 +938,7 @@ static void *dds_worker(void *credentials)
         bool updated = net_client_state(&net, &incoming);
         if (previous_player_id <= 0 && net.player_id > 0)
             printf("Joined room %06u as player %d\n", room_code, net.player_id);
-        if (!net_client_send(&net, direction))
+        if (!net_client_send(&net, continue_requested ? 'c' : direction))
         {
             pthread_mutex_lock(&g_mutex);
             g_client.network_failed = true;
@@ -919,6 +955,8 @@ static void *dds_worker(void *credentials)
         }
         if (updated)
         {
+            if (incoming.phase != 2)
+                g_client.continue_requested = false;
             if (g_client.has_state)
                 for (int p = 0; p < MAX_PLAYERS; ++p)
                 {
@@ -938,9 +976,50 @@ static void *dds_worker(void *credentials)
     return NULL;
 }
 
+static int default_identity_lock = -1;
+
+/* A local advisory lock gives bare `./client` launches a distinct signed
+ * identity in this WSL install. The key/certificate remains the DDS identity;
+ * the lock only prevents two local processes from selecting the same one. */
+static const char *select_default_credentials(void)
+{
+#if defined(__linux__)
+    static char selected[128];
+    char lock_path[128];
+    const unsigned long uid = (unsigned long)getuid();
+
+    for (int identity = 1; identity <= MAX_PLAYERS; ++identity) {
+        snprintf(selected, sizeof(selected), "credentials-private/client%d", identity);
+        char certificate[160];
+        snprintf(certificate, sizeof(certificate), "%s/identity.pem", selected);
+        if (access(certificate, R_OK) != 0)
+            continue;
+
+        snprintf(lock_path, sizeof(lock_path), "/tmp/coin-rush-%lu-client%d.lock", uid, identity);
+        int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0)
+            continue;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            default_identity_lock = fd;
+            fprintf(stderr, "Using local player identity client%d\n", identity);
+            return selected;
+        }
+        close(fd);
+    }
+
+    fprintf(stderr, "No free local player identity is available (maximum %d clients).\n",
+            MAX_PLAYERS);
+    return NULL;
+#else
+    return "credentials-private/client1";
+#endif
+}
+
 int main(int argc, char **argv)
 {
-    const char *credentials = argc > 1 ? argv[1] : "credentials-private/client1";
+    const char *credentials = argc > 1 ? argv[1] : select_default_credentials();
+    if (!credentials)
+        return 1;
     bool software_renderer = configure_wslg_renderer();
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) { fprintf(stderr, "GLFW could not initialize.\n"); return 1; }
@@ -1013,6 +1092,14 @@ int main(int argc, char **argv)
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             else if (point_in_rect(mx, my, 264, 385, 272, 50))
                 g_screen = g_exit_from_game ? UI_GAME : UI_MAIN_MENU;
+        }
+        else if (g_screen == UI_GAME && clicked &&
+                 point_in_rect(mx, my, 264, 300, 272, 58))
+        {
+            pthread_mutex_lock(&g_mutex);
+            if (g_client.has_state && g_client.state.phase == 2)
+                g_client.continue_requested = true;
+            pthread_mutex_unlock(&g_mutex);
         }
 
         pthread_mutex_lock(&g_mutex);

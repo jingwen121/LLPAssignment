@@ -21,7 +21,6 @@
 /* ---------- Coins ---------- */
 #define MAX_COINS        8
 #define MAX_BOMBS        4
-#define START_BOMBS      2
 #define COIN_SIZE        20
 #define COIN_VALUE       1
 #define COIN_SPEED_MIN   2  /* pixels per tick */
@@ -39,13 +38,15 @@
 #define TICK_MS          16 /* ~60 game updates per second */
 #define ROUND_SECONDS    60
 #define LEVEL_ONE_SECONDS (ROUND_SECONDS / 2)
+#define LEVEL_TWO_SECONDS (ROUND_SECONDS / 2)
 #define RESULTS_SECONDS  5
 
 typedef enum
 {
     PHASE_WAITING = 0, /* lobby: waiting for MIN_PLAYERS */
     PHASE_PLAYING = 1, /* round in progress, coins falling */
-    PHASE_RESULTS = 2  /* round over, winners shown */
+    PHASE_LEVEL_BREAK = 2, /* level 1 is over; players choose when to continue */
+    PHASE_RESULTS = 3  /* round over, winners shown */
 } Phase;
 
 typedef struct
@@ -82,7 +83,7 @@ typedef struct
 {
     Phase    phase;
     uint32_t tick;  /* increases every game_tick() */
-    uint64_t phase_end_ms;  /* when the current round / results screen ends */
+    uint64_t phase_end_ms;  /* deadline for the current timed phase; 0 while paused */
     int      time_left;  /* whole seconds left, for the HUD */
     uint8_t  winners;  /* bitmask: bit 0 = player 1 ... ties set several bits */
     int      best_score;
@@ -104,6 +105,9 @@ bool game_remove_player(Game *g, int id);
 /* Server-auth: Store a player's input. dir must be -1, 0 or +1.
  * Returns false (and ignores the input) if the ID or direction is invalid. */
 bool game_set_input(Game *g, int id, int dir, uint64_t now_ms);
+
+/* Advance this room from the level break into level 2. */
+bool game_continue_level(Game *g, int player_id, uint64_t now_ms);
 
 /* Advance the game by one tick. Call every TICK_MS milliseconds. */
 void game_tick(Game *g, uint64_t now_ms);

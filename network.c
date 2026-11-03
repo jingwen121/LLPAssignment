@@ -375,7 +375,7 @@ NetEvent net_server_input(Network *net, const Input *input, const dds_sample_inf
     ++net->received;
     bool valid = info->valid_data && input->int_player_id >= 1 &&
         input->int_player_id <= NET_PLAYERS && input->ch_direction != '\0' &&
-        strchr("lrnq", input->ch_direction) != NULL &&
+        strchr("lrncq", input->ch_direction) != NULL &&
         input->room_code == net->room_code &&
         (!input->leave_room || input->ch_direction == 'q');
     NetSession *session = valid ? &net->sessions[input->int_player_id - 1] : NULL;
@@ -404,6 +404,16 @@ NetEvent net_server_input(Network *net, const Input *input, const dds_sample_inf
     }
     if (input->ch_direction == 'n')
         return (NetEvent){NET_HEARTBEAT, input->int_player_id, 'n'};
+    if (input->ch_direction == 'c')
+    {
+        if (now - session->last_move >= NET_INPUT_NS)
+        {
+            session->last_move = now;
+            return (NetEvent){NET_CONTINUE, input->int_player_id, 'c'};
+        }
+        ++net->rejected;
+        return (NetEvent){0};
+    }
     if (now - session->last_move >= NET_INPUT_NS)
     {
         session->last_move = now;
@@ -424,7 +434,7 @@ NetEvent net_server_poll(Network *net)
     if (take(net->input, &input, &info))
     {
         event = net_server_input(net, &input, &info);
-        if (event.type == NET_MOVE || event.type == NET_LEAVE)
+        if (event.type == NET_MOVE || event.type == NET_LEAVE || event.type == NET_CONTINUE)
             return event;
     }
 
@@ -497,7 +507,7 @@ static bool valid_state(const GameState *state)
 {
     // Bounds protect rendering even when an authenticated peer sends bad data
     // Game rules stay in game.c; these checks only describe the transport contract
-    if (state->phase < 0 || state->phase > 2 || state->level < 0 || state->level > 2 ||
+    if (state->phase < 0 || state->phase > 3 || state->level < 0 || state->level > 2 ||
         state->time_left < 0 ||
         state->time_left > 60 || state->winners < 0 || state->winners >= (1 << NET_PLAYERS) ||
         state->best_score < 0)

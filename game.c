@@ -141,6 +141,9 @@ static void move_coins(Game *g)
 
 static void move_bombs(Game *g)
 {
+    if (g->level < 2)
+        return;
+
     for (int i = 0; i < MAX_BOMBS; ++i)
     {
         Bomb *b = &g->bombs[i];
@@ -190,6 +193,9 @@ static void check_catches(Game *g)
 
 static void check_bomb_hits(Game *g, uint64_t now_ms)
 {
+    if (g->level < 2)
+        return;
+
     for (int b = 0; b < MAX_BOMBS; ++b)
     {
         Bomb *bomb = &g->bombs[b];
@@ -243,22 +249,35 @@ static void start_round(Game *g, uint64_t now_ms)
     }
     for (int i = 0; i < MAX_BOMBS; ++i)
     {
-        g->bombs[i].active = i < START_BOMBS;
-        if (g->bombs[i].active)
-            spawn_bomb(g, &g->bombs[i], true);
+        /* Level 1 is the original coin-only mode. Bombs begin in level 2. */
+        g->bombs[i].active = false;
     }
 
-    /* Start the 60-second timer.
-     * We store WHEN the round must end (now + 60,000 ms) instead of
-     * counting down. game_tick() ends the round once the clock reaches
-     * this time. if a tick runs late, a countdown would drift and
-     * the round would last longer than 60 s; comparing with the real
-     * clock always gives exactly 60 s.
-     * (uint64_t) makes the multiplication use 64-bit numbers, so it
-     * cannot overflow when added to the current time. */
-
-    g->phase_end_ms = now_ms + (uint64_t)ROUND_SECONDS * 1000;
+    /* Level 1 has its own timer. Level 2 starts only when someone chooses
+     * Continue from the shared level-break screen. */
+    g->phase_end_ms = now_ms + (uint64_t)LEVEL_ONE_SECONDS * 1000;
     printf("=== Round started with %d players ===\n", game_num_active(g));
+}
+
+static void start_level_two(Game *g, uint64_t now_ms)
+{
+    g->level = 2;
+    g->phase = PHASE_PLAYING;
+    g->phase_end_ms = now_ms + (uint64_t)LEVEL_TWO_SECONDS * 1000;
+
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
+        if (!g->players[i].active)
+            continue;
+        g->players[i].lives = LIVES_PER_PLAYER;
+        g->players[i].last_bomb_hit_ms = 0;
+    }
+    for (int i = 0; i < MAX_COINS; ++i)
+        spawn_coin(g, &g->coins[i], true);
+    for (int i = 0; i < MAX_BOMBS; ++i)
+        spawn_bomb(g, &g->bombs[i], true);
+
+    printf("=== Level 2 started: faster coins, bombs and 3 lives ===\n");
 }
 
 /* Find the highest score among active players. Every player with that
@@ -382,6 +401,16 @@ bool game_set_input(Game *g, int id, int dir, uint64_t now_ms)
     return true;
 }
 
+bool game_continue_level(Game *g, int player_id, uint64_t now_ms)
+{
+    if (g->phase != PHASE_LEVEL_BREAK || player_id < 1 ||
+        player_id > MAX_PLAYERS || !g->players[player_id - 1].active)
+        return false;
+
+    start_level_two(g, now_ms);
+    return true;
+}
+
 void game_tick(Game *g, uint64_t now_ms)
 {
     g->tick++;
@@ -402,24 +431,23 @@ void game_tick(Game *g, uint64_t now_ms)
             move_bombs(g);
             check_bomb_hits(g, now_ms);
 
-            /* Level 2 begins halfway through the 60-second round. */
-            if (g->level == 1 &&
-                now_ms >= g->phase_end_ms - (uint64_t)LEVEL_ONE_SECONDS * 1000)
+            if (g->level == 1 && now_ms >= g->phase_end_ms)
             {
-                g->level = 2;
+                g->phase = PHASE_LEVEL_BREAK;
+                g->phase_end_ms = 0;
                 for (int i = 0; i < MAX_COINS; ++i)
-                    if (g->coins[i].active)
-                        set_coin_speed(g, &g->coins[i]);
+                    g->coins[i].active = false;
                 for (int i = 0; i < MAX_BOMBS; ++i)
-                    spawn_bomb(g, &g->bombs[i], true);
-                printf("=== Level 2! Faster coins and more bombs ===\n");
+                    g->bombs[i].active = false;
+                printf("=== Level 1 complete: waiting for Continue ===\n");
             }
-            
-            /*  Round timer:End the round when:
-             *   - the clock has reached the end time set in start_round(), or
-             *   - players left and fewer than MIN_PLAYERS remain
-             *  (one player alone can't play, so they win) */
-            if (now_ms >= g->phase_end_ms || game_num_alive(g) < MIN_PLAYERS)
+            else if (g->level == 2 &&
+                     (now_ms >= g->phase_end_ms || game_num_alive(g) < MIN_PLAYERS))
+                end_round(g, now_ms);
+            break;
+
+        case PHASE_LEVEL_BREAK:
+            if (game_num_active(g) < MIN_PLAYERS)
                 end_round(g, now_ms);
             break;
 
@@ -444,7 +472,7 @@ void game_tick(Game *g, uint64_t now_ms)
 
 void game_print(const Game *g)
 {
-    static const char *names[] = { "WAITING", "PLAYING", "RESULTS" };
+    static const char *names[] = { "WAITING", "PLAYING", "LEVEL BREAK", "RESULTS" };
     int coins = 0;
     for (int i = 0; i < MAX_COINS; i++)
         if (g->coins[i].active)
