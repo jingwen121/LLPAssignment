@@ -6,26 +6,33 @@ to create or join isolated matches.
 
 ## Build in WSL
 
-Install dependencies once:
-
-```sh
-sudo apt update
-sudo apt install build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev libssl-dev
-```
-
-From the project directory, build both executables with one command:
+From the project directory, build the game with:
 
 ```sh
 make
 ```
 
-This generates the DDS message code from `messages.idl`, then creates the
-`build/server` and `build/client` executables. The build reuses unchanged files.
+On Debian/Ubuntu/WSL, the Makefile checks for the compiler, Cyclone DDS, GLFW,
+OpenGL and OpenSSL development packages. If any are missing, it asks `sudo` to
+install them with `apt`. It then generates the DDS message code, builds the
+server and client, and creates local credentials on the first build. The game
+executables are `build/server` and `build/client`.
+
+For a clean rebuild:
+
+```sh
+make clean && make
+```
+
+To launch a local demo with a server and first client in one terminal:
+
+```sh
+make run
+```
 
 ## Start a match
 
-Generate credentials once with `bash security.sh credentials-private`; give each player
-only their own client directory and keep the authority and server keys private.
+For separate terminals or network play, use the generated credentials as shown below.
 
 1. In one WSL terminal, run `./build/server credentials-private/server`.
 2. In a second terminal, run `./build/client credentials-private/client1` and choose **Play - Create Room**.
