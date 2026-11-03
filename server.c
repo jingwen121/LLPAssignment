@@ -9,7 +9,7 @@
 #include <time.h>
 
 #include "game.h"
-#include "messages.h"
+#include <messages.h>
 #include "network.h"
 
 #define MAX_ROOMS 8

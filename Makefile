@@ -4,14 +4,18 @@ CFLAGS = -std=c11 -D_DEFAULT_SOURCE -O2 -g -Wall -Wextra -Wpedantic
 DDS_LIBS = $(shell pkg-config --libs CycloneDDS) -pthread -lcrypto
 SANFLAGS = -std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test qa test-sanitize profile wire loss
+.PHONY: all clean test qa test-sanitize profile wire loss
 all: build/server build/client build/test_validation build/test_game
+
+clean:
+	rm -rf build
+	rm -f messages.c messages.h
 
 build:
 	mkdir -p build
 
 build/messages.c build/messages.h &: messages.idl | build
-	idlc -l c -o build messages.idl
+	cd build && idlc -l c ../messages.idl
 
 build/server: server.c game.c game.h network.c network.h build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) server.c game.c network.c build/messages.c -o $@ $(DDS_LIBS)

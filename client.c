@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "messages.h"
+#include <messages.h>
 #include "network.h"
 #include "stb_easy_font.h"
 

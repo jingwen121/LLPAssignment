@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "dds/dds.h"
-#include "messages.h"
+#include <messages.h>
 
 #define NET_PLAYERS 5
 // Capacity covers the current game without changing how many coins it spawns
