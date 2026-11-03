@@ -7,6 +7,7 @@ CYCLONE_LIBS = $(shell pkg-config --libs CycloneDDS)
 GLFW_LIBS = $(shell pkg-config --libs glfw3)
 OPENSSL_LIBS = $(shell pkg-config --libs openssl)
 DDS_LIBS = $(CYCLONE_LIBS) -pthread $(OPENSSL_LIBS)
+EFFECT_ASSETS = assets/effects/bomb_spritesheet.rgba assets/effects/plus_spritesheet.rgba assets/effects/colored_hearts.rgba
 SANFLAGS = -std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: all clean check-deps credentials run test qa test-sanitize profile wire loss
@@ -83,7 +84,7 @@ build/messages.c build/messages.h &: messages.idl | build
 build/server: server.c game.c game.h network.c network.h build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) server.c game.c network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/client: client.c network.c network.h stb_easy_font.h build/messages.c build/messages.h
+build/client: client.c network.c network.h stb_easy_font.h $(EFFECT_ASSETS) build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(CFLAGS) client.c network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) -lGL -lm
 
 build/test_validation: test_validation.c network.c network.h build/messages.c build/messages.h

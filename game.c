@@ -31,6 +31,16 @@ static int count_gold(const Game *g)
     return n;
 }
 
+static void set_coin_speed(Game *g, Coin *c)
+{
+    if (c->gold)
+        c->speed = g->level >= 2 ? rand_range(7, 10) :
+                                  rand_range(GOLD_SPEED_MIN, GOLD_SPEED_MAX);
+    else
+        c->speed = g->level >= 2 ? rand_range(4, 6) :
+                                  rand_range(COIN_SPEED_MIN, COIN_SPEED_MAX);
+}
+
 /*  Coin spawning
  * (Re)spawn coin c above the top of the screen with a random x position.
  *   - About 1 in GOLD_CHANCE spawns is gold, but only if no gold coin is
@@ -50,10 +60,18 @@ static void spawn_coin(Game *g, Coin *c, bool spread_out)
     c->gold = gold;
     c->size = gold ? GOLD_SIZE  : COIN_SIZE;
     c->value = gold ? GOLD_VALUE : COIN_VALUE;
-    c->speed = gold ? rand_range(GOLD_SPEED_MIN, GOLD_SPEED_MAX)
-                     : rand_range(COIN_SPEED_MIN, COIN_SPEED_MAX);
+    set_coin_speed(g, c);
     c->x = rand_range(0, WIDTH - c->size);
     c->y = -c->size - (spread_out ? rand_range(0, HEIGHT) : rand_range(0, 100));
+}
+
+static void spawn_bomb(Game *g, Bomb *b, bool spread_out)
+{
+    b->active = true;
+    b->size = BOMB_SIZE;
+    b->speed = g->level >= 2 ? rand_range(6, 9) : rand_range(3, 5);
+    b->x = rand_range(0, WIDTH - b->size);
+    b->y = -b->size - (spread_out ? rand_range(0, HEIGHT) : rand_range(0, 220));
 }
 
 static void print_winners(uint8_t mask)
@@ -80,6 +98,8 @@ static void move_players(Game *g, uint64_t now_ms)
 
         // Skip empty slots: nobody has joined with this ID
         if (!p->active)
+            continue;
+        if (p->lives <= 0)
             continue;
 
         /* The client sends an input about every 10 ms WHILE a key is held,
@@ -119,6 +139,19 @@ static void move_coins(Game *g)
     }
 }
 
+static void move_bombs(Game *g)
+{
+    for (int i = 0; i < MAX_BOMBS; ++i)
+    {
+        Bomb *b = &g->bombs[i];
+        if (!b->active)
+            continue;
+        b->y += b->speed;
+        if (b->y > HEIGHT)
+            spawn_bomb(g, b, false);
+    }
+}
+
 /* Player vs coin collision. Lower player IDs are checked first, so if two
    players touch the same coin in the same tick, the lower ID gets it. */
 static void check_catches(Game *g)
@@ -134,7 +167,7 @@ static void check_catches(Game *g)
             Player *p = &g->players[i];
 
             // Skip empty slots: nobody has joined with this ID
-            if (!p->active)
+            if (!p->active || p->lives <= 0)
                 continue;
 
             /* Collision test */
@@ -142,6 +175,7 @@ static void check_catches(Game *g)
                               coin->x, coin->y, coin->size, coin->size))
             {
                 p->score += coin->value;
+                ++p->collect_seq;
                 printf("Player %d caught a %s coin (+%d) -> score %d\n",
                        i + 1, coin->gold ? "GOLD" : "normal", coin->value, p->score);
 
@@ -154,6 +188,35 @@ static void check_catches(Game *g)
     }
 }
 
+static void check_bomb_hits(Game *g, uint64_t now_ms)
+{
+    for (int b = 0; b < MAX_BOMBS; ++b)
+    {
+        Bomb *bomb = &g->bombs[b];
+        if (!bomb->active)
+            continue;
+
+        for (int i = 0; i < MAX_PLAYERS; ++i)
+        {
+            Player *p = &g->players[i];
+            if (!p->active || p->lives <= 0 ||
+                (p->last_bomb_hit_ms != 0 &&
+                 now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS))
+                continue;
+
+            if (!rects_overlap(p->x, p->y, PLAYER_W, PLAYER_H,
+                               bomb->x, bomb->y, bomb->size, bomb->size))
+                continue;
+
+            --p->lives;
+            p->last_bomb_hit_ms = now_ms;
+            printf("Player %d hit a bomb -> %d lives left\n", i + 1, p->lives);
+            spawn_bomb(g, bomb, false);
+            break;
+        }
+    }
+}
+
 /* ======================================================================
  * Phase changes
  * ====================================================================== */
@@ -162,6 +225,7 @@ static void check_catches(Game *g)
   * MIN_PLAYERS (2) have joined. Sets up a fresh round. */
 static void start_round(Game *g, uint64_t now_ms)
 {
+    g->level = 1;
     for (int i = 0; i < MAX_PLAYERS; i++)
         g->players[i].score = 0;
 
@@ -171,6 +235,18 @@ static void start_round(Game *g, uint64_t now_ms)
     g->winners = 0;
     g->best_score = 0;
     g->phase = PHASE_PLAYING;
+
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
+        g->players[i].lives = LIVES_PER_PLAYER;
+        g->players[i].last_bomb_hit_ms = 0;
+    }
+    for (int i = 0; i < MAX_BOMBS; ++i)
+    {
+        g->bombs[i].active = i < START_BOMBS;
+        if (g->bombs[i].active)
+            spawn_bomb(g, &g->bombs[i], true);
+    }
 
     /* Start the 60-second timer.
      * We store WHEN the round must end (now + 60,000 ms) instead of
@@ -194,7 +270,7 @@ static void end_round(Game *g, uint64_t now_ms)
 
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
-        if (!g->players[i].active)
+        if (!g->players[i].active || g->players[i].lives <= 0)
             continue; // skip empty slots
 
         if (g->players[i].score > best) // new highest score
@@ -210,6 +286,8 @@ static void end_round(Game *g, uint64_t now_ms)
 
     for (int i = 0; i < MAX_COINS; i++)
         g->coins[i].active = false;
+    for (int i = 0; i < MAX_BOMBS; i++)
+        g->bombs[i].active = false;
 
     g->best_score = best < 0 ? 0 : best;
     g->winners = mask;
@@ -239,6 +317,15 @@ int game_num_active(const Game *g)
     return n;
 }
 
+int game_num_alive(const Game *g)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_PLAYERS; i++)
+        if (g->players[i].active && g->players[i].lives > 0)
+            ++n;
+    return n;
+}
+
 int game_add_player(Game *g)
 {
     for (int i = 0; i < MAX_PLAYERS; i++)
@@ -256,6 +343,7 @@ int game_add_player(Game *g)
 
 
         p->active = true;
+        p->lives = LIVES_PER_PLAYER;
         
         /* Start position: split the window into MAX_PLAYERS equal lanes
          * (800 / 5 = 160 px each) and centre the player in its own lane.
@@ -311,12 +399,27 @@ void game_tick(Game *g, uint64_t now_ms)
         case PHASE_PLAYING:
             move_coins(g);
             check_catches(g);
+            move_bombs(g);
+            check_bomb_hits(g, now_ms);
+
+            /* Level 2 begins halfway through the 60-second round. */
+            if (g->level == 1 &&
+                now_ms >= g->phase_end_ms - (uint64_t)LEVEL_ONE_SECONDS * 1000)
+            {
+                g->level = 2;
+                for (int i = 0; i < MAX_COINS; ++i)
+                    if (g->coins[i].active)
+                        set_coin_speed(g, &g->coins[i]);
+                for (int i = 0; i < MAX_BOMBS; ++i)
+                    spawn_bomb(g, &g->bombs[i], true);
+                printf("=== Level 2! Faster coins and more bombs ===\n");
+            }
             
             /*  Round timer:End the round when:
              *   - the clock has reached the end time set in start_round(), or
              *   - players left and fewer than MIN_PLAYERS remain
              *  (one player alone can't play, so they win) */
-            if (now_ms >= g->phase_end_ms || game_num_active(g) < MIN_PLAYERS)
+            if (now_ms >= g->phase_end_ms || game_num_alive(g) < MIN_PLAYERS)
                 end_round(g, now_ms);
             break;
 
@@ -347,12 +450,13 @@ void game_print(const Game *g)
         if (g->coins[i].active)
             coins++;
 
-    printf("[%s] time left %2ds | coins %d | ", names[g->phase], g->time_left, coins);
+    printf("[%s] level %d time left %2ds | coins %d | ", names[g->phase], g->level, g->time_left, coins);
 
     // Position and score of every player in the game
     // (%3d pads x to 3 characters, so columns line up)
     for (int i = 0; i < MAX_PLAYERS; i++)
         if (g->players[i].active)
-            printf("P%d: x=%3d score=%d  ", i + 1, g->players[i].x, g->players[i].score);
+            printf("P%d: x=%3d score=%d lives=%d  ", i + 1, g->players[i].x,
+                   g->players[i].score, g->players[i].lives);
     printf("\n");
 }

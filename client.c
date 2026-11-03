@@ -26,6 +26,7 @@
 #define PLAYER_H 50
 #define MAX_PLAYERS 5
 #define MAX_COINS 8
+#define MAX_BOMBS 4
 #define MAX_ROOM_SAMPLES 16
 #define CAT_SPRITE_SIZE 64
 #define CAT_ASSET_DIR "assets/cats/idle/"
@@ -45,6 +46,17 @@
 #define CATO_JUMP_FRAMES 25
 #define MENU_CAT_COUNT 2
 #define MENU_CAT_SIZE 150.0f
+#define BOMB_SHEET_PATH "assets/effects/bomb_spritesheet.rgba"
+#define BOMB_SHEET_WIDTH 64
+#define BOMB_SHEET_HEIGHT 16
+#define BOMB_FRAME_SIZE 16
+#define PLUS_SHEET_PATH "assets/effects/plus_spritesheet.rgba"
+#define PLUS_SHEET_WIDTH 640
+#define PLUS_SHEET_HEIGHT 1024
+#define PLUS_FRAME_SIZE 128
+#define HEART_SHEET_PATH "assets/effects/colored_hearts.rgba"
+#define HEART_SHEET_WIDTH 116
+#define HEART_SHEET_HEIGHT 85
 
 typedef enum { UI_MAIN_MENU, UI_JOIN_CODE, UI_CONNECTING, UI_GAME, UI_EXIT_CONFIRM } UiScreen;
 
@@ -90,10 +102,25 @@ typedef struct
     MenuCatAnimation animation;
     double animation_started, next_animation;
 } MenuCat;
+
+typedef struct
+{
+    bool tracked;
+    bool was_active;
+    bool active;
+    uint32_t last_collect_seq;
+    double started;
+    float x, y;
+} PickupEffect;
+
 static MenuCat g_menu_cats[MENU_CAT_COUNT];
 static GLuint g_tofu_texture;
 static GLuint g_cato_walk_texture;
 static GLuint g_cato_jump_texture;
+static GLuint g_bomb_texture;
+static GLuint g_plus_texture;
+static GLuint g_heart_texture;
+static PickupEffect g_pickup_effects[MAX_PLAYERS];
 
 static void glfw_error_callback(int code, const char *description)
 {
@@ -316,6 +343,89 @@ static void draw_atlas_frame(GLuint texture, int frame, int frame_count,
     glDisable(GL_TEXTURE_2D);
 }
 
+static void draw_bomb(const GameState *state, int i, double now)
+{
+    if (!g_bomb_texture || !state->bomb_active[i])
+        return;
+    int frame = ((int)(now * 8.0) + i) % 4;
+    draw_atlas_frame(g_bomb_texture, frame, 4, 4, 1, BOMB_FRAME_SIZE,
+                     BOMB_SHEET_WIDTH, BOMB_SHEET_HEIGHT,
+                     (float)state->bomb_x[i] - 4.0f,
+                     (float)state->bomb_y[i] - 4.0f, 32.0f, false);
+}
+
+static void draw_lives(const GameState *state, int i)
+{
+    int lives = state->player_lives[i];
+    float x = (float)state->player_x[i] + (float)PLAYER_W * 0.5f - 25.0f;
+    float y = (float)state->player_y[i] - 48.0f;
+    if (lives <= 0)
+    {
+        glColor3f(1.0f, 0.48f, 0.52f);
+        draw_centered((float)state->player_x[i] + (float)PLAYER_W * 0.5f,
+                      y + 1.0f, 1.0f, "OUT");
+        return;
+    }
+    for (int life = 0; life < lives; ++life)
+        if (g_heart_texture)
+            draw_atlas_frame(g_heart_texture, 0, 1, 7, 5, 16,
+                             HEART_SHEET_WIDTH, HEART_SHEET_HEIGHT,
+                             x + (float)life * 17.0f, y, 16.0f, false);
+        else
+        {
+            glColor3f(1.0f, 0.24f, 0.35f);
+            draw_rect(x + (float)life * 17.0f, y + 4.0f, 12.0f, 10.0f);
+        }
+}
+
+static void observe_coin_collects(const GameState *state, double now)
+{
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
+        PickupEffect *effect = &g_pickup_effects[i];
+        bool active = state->player_active[i];
+        if (!effect->tracked || active != effect->was_active)
+        {
+            effect->tracked = true;
+            effect->was_active = active;
+            effect->last_collect_seq = state->player_collect_seq[i];
+            continue;
+        }
+        if (active && state->player_collect_seq[i] != effect->last_collect_seq)
+        {
+            effect->last_collect_seq = state->player_collect_seq[i];
+            effect->started = now;
+            effect->x = (float)state->player_x[i] + (float)PLAYER_W * 0.5f;
+            effect->y = (float)state->player_y[i] - 80.0f;
+            effect->active = true;
+        }
+    }
+}
+
+static void draw_coin_collect_fx(double now)
+{
+    if (!g_plus_texture)
+        return;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
+        PickupEffect *effect = &g_pickup_effects[i];
+        if (!effect->active)
+            continue;
+        double elapsed = now - effect->started;
+        if (elapsed >= 0.72)
+        {
+            effect->active = false;
+            continue;
+        }
+        int frame = ((int)(elapsed * 32.0)) % 40;
+        float size = 36.0f;
+        float y = effect->y - (float)elapsed * 26.0f;
+        draw_atlas_frame(g_plus_texture, frame, 40, 5, 8, PLUS_FRAME_SIZE,
+                         PLUS_SHEET_WIDTH, PLUS_SHEET_HEIGHT,
+                         effect->x - size * 0.5f, y, size, false);
+    }
+}
+
 static double random_between(double low, double high)
 {
     return low + (high - low) * ((double)rand() / (double)RAND_MAX);
@@ -463,7 +573,8 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
     if (!state->player_active[i])
         return;
     int x = state->player_x[i], y = state->player_y[i];
-    const float *tint = tints[i];
+    const float eliminated_tint[3] = {0.30f, 0.32f, 0.38f};
+    const float *tint = state->player_lives[i] > 0 ? tints[i] : eliminated_tint;
     GLuint sprite = facing < 0 ? cat_west : cat_east;
     if (sprite)
         draw_cat(sprite, (float)x - 7.0f, (float)y - 28.0f, tint);
@@ -479,7 +590,7 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
     if (my_id == i + 1)
     {
         glColor3f(0.68f, 0.91f, 1.0f);
-        draw_centered((float)x + 25.0f, (float)y - 42.0f, 1.1f, "YOU");
+        draw_centered((float)x + 25.0f, (float)y - 68.0f, 1.1f, "YOU");
     }
 }
 
@@ -492,7 +603,7 @@ static const char *phase_name(int phase)
 
 static void draw_arena(const GameState *state, bool has_state, int player_id,
                        uint32_t room_code, const int facing[MAX_PLAYERS],
-                       GLuint cat_east, GLuint cat_west)
+                       GLuint cat_east, GLuint cat_west, double now)
 {
     glClearColor(0.035f, 0.055f, 0.095f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -521,6 +632,9 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     for (int i = 0; i < MAX_PLAYERS; ++i)
         active_count += state->player_active[i] ? 1 : 0;
     char text[96];
+    char level_label[24];
+    snprintf(level_label, sizeof(level_label), "LEVEL %d", state->level > 0 ? state->level : 1);
+    glColor3f(0.58f, 0.83f, 1.0f); draw_centered(215, 20, 1.35f, level_label);
     glColor3f(0.88f, 0.93f, 1.0f); draw_centered(330, 20, 1.6f, phase_name(state->phase));
     glColor3f(1.0f, 0.83f, 0.42f);
     snprintf(text, sizeof(text), "TIME  %02d", state->time_left); draw_centered(525, 20, 1.8f, text);
@@ -537,11 +651,19 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
         for (int i = 0; i < MAX_COINS; ++i)
             if (state->coin_active[i])
                 draw_coin(state->coin_x[i], state->coin_y[i], state->coin_size[i], state->coin_gold[i]);
+        for (int i = 0; i < MAX_BOMBS; ++i)
+            draw_bomb(state, i, now);
         glDisable(GL_SCISSOR_TEST);
     }
 
     for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
         draw_player(state, i, player_id, facing[i], cat_east, cat_west);
+        if (state->player_active[i])
+            draw_lives(state, i);
+    }
+    if (state->phase == 1)
+        draw_coin_collect_fx(now);
 
     if (state->phase == 0)
     {
@@ -680,6 +802,7 @@ static void draw_connecting(uint32_t room_code, bool create_room)
 
 static void start_room_request(uint32_t room_code, bool create_room)
 {
+    memset(g_pickup_effects, 0, sizeof(g_pickup_effects));
     pthread_mutex_lock(&g_mutex);
     g_client.room_code = room_code;
     g_client.create_room = create_room;
@@ -844,6 +967,9 @@ int main(int argc, char **argv)
     g_tofu_texture = load_rgba_texture(TOFU_ASSET_PATH, TOFU_SHEET_WIDTH, TOFU_SHEET_HEIGHT);
     g_cato_walk_texture = load_rgba_texture(CATO_WALK_ASSET_PATH, CATO_SHEET_WIDTH, CATO_SHEET_HEIGHT);
     g_cato_jump_texture = load_rgba_texture(CATO_JUMP_ASSET_PATH, CATO_SHEET_WIDTH, CATO_SHEET_HEIGHT);
+    g_bomb_texture = load_rgba_texture(BOMB_SHEET_PATH, BOMB_SHEET_WIDTH, BOMB_SHEET_HEIGHT);
+    g_plus_texture = load_rgba_texture(PLUS_SHEET_PATH, PLUS_SHEET_WIDTH, PLUS_SHEET_HEIGHT);
+    g_heart_texture = load_rgba_texture(HEART_SHEET_PATH, HEART_SHEET_WIDTH, HEART_SHEET_HEIGHT);
     initialize_menu_cats(glfwGetTime());
 
     pthread_mutex_lock(&g_mutex); g_client.running = true; g_client.direction = 'n'; pthread_mutex_unlock(&g_mutex);
@@ -906,6 +1032,10 @@ int main(int argc, char **argv)
             g_client.direction = 'r';
         pthread_mutex_unlock(&g_mutex);
 
+        double frame_time = glfwGetTime();
+        if (has_state)
+            observe_coin_collects(&state, frame_time);
+
         if (network_failed)
         {
             fprintf(stderr, "Secure DDS connection failed; check this client's credentials\n");
@@ -934,7 +1064,8 @@ int main(int argc, char **argv)
         else if (g_screen == UI_JOIN_CODE) draw_join_code_screen(mx, my);
         else if (g_screen == UI_CONNECTING) draw_connecting(room_code, create_room);
         else if (g_screen == UI_EXIT_CONFIRM) draw_exit_confirm(mx, my);
-        else draw_arena(&state, has_state, player_id, room_code, facing, cat_east, cat_west);
+        else draw_arena(&state, has_state, player_id, room_code, facing,
+                        cat_east, cat_west, frame_time);
         glfwSwapBuffers(window);
     }
 

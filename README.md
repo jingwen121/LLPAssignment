@@ -69,6 +69,11 @@ Clients must be able to discover the same Cyclone DDS server on the network.
   each player has a separate tint and faces left or right as they move.
 - The HUD, falling coins, scores, timer and player positions use the latest
   authoritative room snapshot from the server.
+- Each 60-second round has two 30-second levels. Level 2 increases coin and
+  bomb speeds and adds more falling bombs. Every player starts each round with
+  three heart lives; bomb hits cost one life, and eliminated players stop
+  collecting coins. Hearts, bomb animation and coin pickup plus effects are
+  rendered from the sprites in `assets/effects/`.
 - Players can pass through one another. Coins are clipped to the playfield below
   the HUD, including after the window is resized.
 - On WSLg, the client uses Mesa software OpenGL with two worker threads and

@@ -1,0 +1,21 @@
+END USER LICENSE AGREEMENT (EULA) - COLORED HEARTS ASSET PACK
+
+This License Agreement governs the use of the "Colored Hearts" asset pack (consisting of 6 files). By downloading or purchasing these assets, you agree to the following terms.
+
+1. GENERAL TERMS (Applicable to all assets)
+- This license is non-exclusive, worldwide, and perpetual.
+- You are granted the right to use these assets in both free and commercial projects (such as video games, animations, UI, etc.).
+- Sub-licensing, transferring, or assigning this license to third parties is strictly prohibited.
+- Attribution is optional. If you choose to credit the author, you may use the name "Beagle" or "Nebulystic".
+
+2. FREE VERSION TERMS (Red Heart Asset)
+- Grant of Right: You may use and modify the Red Heart asset for integration into your personal or commercial end-products.
+- Restriction: You are STRICTLY PROHIBITED from republishing, redistributing, broadcasting, or reselling the Red Heart asset as a standalone resource, an asset pack, or part of a template, whether in its original form or in a modified version.
+
+3. PAID VERSION TERMS (Other Colored Heart Assets)
+- Grant of Right: You may use and modify the paid colored heart assets for integration into your personal or commercial end-products.
+- Republication: You are authorized to republish, redistribute, or resell these paid assets ONLY if they have been modified or altered from their original state. 
+- Restriction: You are strictly prohibited from redistributing, sharing, or reselling the original, unmodified paid files as standalone assets.
+
+4. LIMITATION OF LIABILITY
+The assets are provided "as is", without warranty of any kind. The author shall not be liable for any claim, damages, or other liability arising from the use of the assets.

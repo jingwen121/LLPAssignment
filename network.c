@@ -497,14 +497,16 @@ static bool valid_state(const GameState *state)
 {
     // Bounds protect rendering even when an authenticated peer sends bad data
     // Game rules stay in game.c; these checks only describe the transport contract
-    if (state->phase < 0 || state->phase > 2 || state->time_left < 0 ||
+    if (state->phase < 0 || state->phase > 2 || state->level < 0 || state->level > 2 ||
+        state->time_left < 0 ||
         state->time_left > 60 || state->winners < 0 || state->winners >= (1 << NET_PLAYERS) ||
         state->best_score < 0)
         return false;
 
     for (int i = 0; i < NET_PLAYERS; ++i)
         if (state->player_x[i] < 0 || state->player_x[i] > 750 ||
-            state->player_y[i] < 0 || state->player_y[i] > 550 || state->player_score[i] < 0)
+            state->player_y[i] < 0 || state->player_y[i] > 550 || state->player_score[i] < 0 ||
+            state->player_lives[i] < 0 || state->player_lives[i] > 3)
             return false;
 
     // Coins use the game's top-left coordinates; fixed sizes also bound draw work
@@ -512,6 +514,11 @@ static bool valid_state(const GameState *state)
         if (state->coin_x[i] < 0 || state->coin_x[i] > 800 ||
             state->coin_y[i] < -620 || state->coin_y[i] > 620 ||
             (state->coin_active[i] && state->coin_size[i] != 14 && state->coin_size[i] != 20))
+            return false;
+    for (int i = 0; i < NET_BOMBS; ++i)
+        if (state->bomb_x[i] < 0 || state->bomb_x[i] > 800 ||
+            state->bomb_y[i] < -700 || state->bomb_y[i] > 620 ||
+            (state->bomb_active[i] && state->bomb_size[i] != 24))
             return false;
     return true;
 }

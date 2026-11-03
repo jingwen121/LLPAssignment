@@ -9,6 +9,7 @@
 #define NET_PLAYERS 5
 // Capacity covers the current game without changing how many coins it spawns
 #define NET_COINS 8
+#define NET_BOMBS 4
 #define NET_DOMAIN 42
 #define NET_ROOMS 8
 #define NET_IDENTITIES 6

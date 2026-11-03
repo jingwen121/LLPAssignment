@@ -20,6 +20,8 @@
 
 /* ---------- Coins ---------- */
 #define MAX_COINS        8
+#define MAX_BOMBS        4
+#define START_BOMBS      2
 #define COIN_SIZE        20
 #define COIN_VALUE       1
 #define COIN_SPEED_MIN   2  /* pixels per tick */
@@ -29,10 +31,14 @@
 #define GOLD_SPEED_MIN   5
 #define GOLD_SPEED_MAX   7
 #define GOLD_CHANCE      10 /* 1 in N spawns is gold (max 1 at a time) */
+#define BOMB_SIZE        24
+#define LIVES_PER_PLAYER 3
+#define BOMB_HIT_COOLDOWN_MS 900
 
 /* ---------- Timing ---------- */
 #define TICK_MS          16 /* ~60 game updates per second */
 #define ROUND_SECONDS    60
+#define LEVEL_ONE_SECONDS (ROUND_SECONDS / 2)
 #define RESULTS_SECONDS  5
 
 typedef enum
@@ -47,6 +53,9 @@ typedef struct
     bool     active;
     int      x, y; /* top-left corner of the square */
     int      score;
+    int      lives;
+    uint32_t collect_seq; /* increments once for each coin caught */
+    uint64_t last_bomb_hit_ms;
     int      dir;  /* latest input: -1 left, 0 none, +1 right */
     uint64_t last_input_ms;  /* when that input arrived */
 } Player;
@@ -63,14 +72,24 @@ typedef struct
 
 typedef struct
 {
+    bool active;
+    int x, y;
+    int size;
+    int speed;
+} Bomb;
+
+typedef struct
+{
     Phase    phase;
     uint32_t tick;  /* increases every game_tick() */
     uint64_t phase_end_ms;  /* when the current round / results screen ends */
     int      time_left;  /* whole seconds left, for the HUD */
     uint8_t  winners;  /* bitmask: bit 0 = player 1 ... ties set several bits */
     int      best_score;
+    int      level;
     Player   players[MAX_PLAYERS]; /* player ID = index + 1 */
     Coin     coins[MAX_COINS];
+    Bomb     bombs[MAX_BOMBS];
 } Game;
 
 /* Reset everything to an empty lobby. */
@@ -91,6 +110,7 @@ void game_tick(Game *g, uint64_t now_ms);
 
 /* Number of players currently in the game. */
 int  game_num_active(const Game *g);
+int  game_num_alive(const Game *g);
 
 /* Debug: print phase, timer, scores and coins to the terminal. */
 void game_print(const Game *g);

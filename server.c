@@ -99,12 +99,15 @@ static void fill_game_state(GameState *out, const Room *room)
     out->time_left = game->time_left;
     out->winners = game->winners;
     out->best_score = game->best_score;
+    out->level = game->level;
     for (int i = 0; i < MAX_PLAYERS; ++i)
     {
         out->player_active[i] = game->players[i].active;
         out->player_x[i] = game->players[i].x;
         out->player_y[i] = game->players[i].y;
         out->player_score[i] = game->players[i].score;
+        out->player_lives[i] = game->players[i].lives;
+        out->player_collect_seq[i] = game->players[i].collect_seq;
     }
     for (int i = 0; i < MAX_COINS; ++i)
     {
@@ -113,6 +116,13 @@ static void fill_game_state(GameState *out, const Room *room)
         out->coin_x[i] = game->coins[i].x;
         out->coin_y[i] = game->coins[i].y;
         out->coin_size[i] = game->coins[i].size;
+    }
+    for (int i = 0; i < MAX_BOMBS; ++i)
+    {
+        out->bomb_active[i] = game->bombs[i].active;
+        out->bomb_x[i] = game->bombs[i].x;
+        out->bomb_y[i] = game->bombs[i].y;
+        out->bomb_size[i] = game->bombs[i].size;
     }
 }
 
