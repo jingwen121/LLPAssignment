@@ -1,5 +1,5 @@
 CC = gcc
-CPPFLAGS += -Ibuild
+CPPFLAGS += -Iinclude -Ivendor -Ibuild
 CFLAGS = -std=c11 -D_DEFAULT_SOURCE -O2 -g -Wall -Wextra -Wpedantic
 CYCLONE_CFLAGS = $(shell pkg-config --cflags CycloneDDS)
 GLFW_CFLAGS = $(shell pkg-config --cflags glfw3)
@@ -75,7 +75,7 @@ clean:
 	rm -f messages.c messages.h server client test_validation *.o core core.*
 	rm -f .server.install.* .client.install.*
 
-credentials: security.sh
+credentials: scripts/security.sh
 	@if test -f credentials-private/server/identity.pem && \
 	    test -f credentials-private/client1/identity.pem; then \
 	    echo 'Local credentials are ready.'; \
@@ -83,12 +83,12 @@ credentials: security.sh
 	    if test -e credentials-private; then \
 	        echo 'credentials-private exists but is incomplete; move it aside before regenerating.' >&2; exit 1; \
 	    fi; \
-	    bash security.sh credentials-private; \
+	    bash scripts/security.sh credentials-private; \
 	fi
 
 invite: credentials
 	@command -v gpg >/dev/null 2>&1 || { echo 'Install GnuPG first: sudo apt install gnupg' >&2; exit 1; }
-	bash make-invite.sh "$(PLAYER)"
+	bash scripts/make-invite.sh "$(PLAYER)"
 
 run: all
 	@./server & server_pid=$$!; \
@@ -104,49 +104,49 @@ run-player2: all
 build: | check-deps
 	mkdir -p build
 
-build/messages.c build/messages.h &: messages.idl | build
-	cd build && idlc -l c ../messages.idl
+build/messages.c build/messages.h &: protocol/messages.idl | build
+	cd build && idlc -l c ../protocol/messages.idl
 
-build/server: server.c game.c game.h network.c network.h build/messages.c build/messages.h
-	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) server.c game.c network.c build/messages.c -o $@ $(DDS_LIBS)
+build/server: src/server.c src/game.c include/game.h src/network.c include/network.h build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) src/server.c src/game.c src/network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/client: client.c network.c network.h stb_easy_font.h $(EFFECT_ASSETS) assets/music/level1.mp3 assets/music/level2.mp3 build/messages.c build/messages.h
-	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(SDL_MIXER_CFLAGS) $(CFLAGS) client.c network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) $(SDL_MIXER_LIBS) -lGL -lm
+build/client: src/client.c src/network.c include/network.h vendor/stb_easy_font.h $(EFFECT_ASSETS) assets/music/level1.mp3 assets/music/level2.mp3 build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(SDL_MIXER_CFLAGS) $(CFLAGS) src/client.c src/network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) $(SDL_MIXER_LIBS) -lGL -lm
 
-build/test_validation: test_validation.c network.c network.h build/messages.c build/messages.h
-	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) test_validation.c network.c build/messages.c -o $@ $(DDS_LIBS)
+build/test_validation: tests/test_validation.c src/network.c include/network.h build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) tests/test_validation.c src/network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/test_game: test_game.c game.c game.h | build
-	$(CC) $(CFLAGS) test_game.c game.c -o $@
+build/test_game: tests/test_game.c src/game.c include/game.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_game.c src/game.c -o $@
 
 test: build/test_validation build/test_game
 	./build/test_game
 	./build/test_validation credentials-private
 
 # Run security and networking checks
-qa: all
-	python3 qa.py check
+qa: all build/test_game build/test_validation
+	python3 tests/qa.py check
 
 # Compile the same process-based tests with runtime memory and UB checks
-build/test_sanitized: test_validation.c network.c network.h build/messages.c build/messages.h
-	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(SANFLAGS) test_validation.c network.c build/messages.c -o $@ $(DDS_LIBS)
+build/test_sanitized: tests/test_validation.c src/network.c include/network.h build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(SANFLAGS) tests/test_validation.c src/network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/server_sanitized: server.c game.c game.h network.c network.h build/messages.c build/messages.h
-	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(SANFLAGS) server.c game.c network.c build/messages.c -o $@ $(DDS_LIBS)
+build/server_sanitized: src/server.c src/game.c include/game.h src/network.c include/network.h build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(SANFLAGS) src/server.c src/game.c src/network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/test_game_sanitized: test_game.c game.c game.h | build
-	$(CC) $(SANFLAGS) test_game.c game.c -o $@
+build/test_game_sanitized: tests/test_game.c src/game.c include/game.h | build
+	$(CC) $(CPPFLAGS) $(SANFLAGS) tests/test_game.c src/game.c -o $@
 
 test-sanitize: build/test_sanitized build/server_sanitized build/test_game_sanitized
-	python3 qa.py sanitize
+	python3 tests/qa.py sanitize
 
 profile: all
-	python3 qa.py profile
+	python3 tests/qa.py profile
 
 # Capture and impairment need Linux network privileges; unshare creates a fresh
 # network namespace; these commands never apply loss to the host's real network
 wire: all
-	sudo unshare --net python3 qa.py wire
+	sudo unshare --net python3 tests/qa.py wire
 
 loss: all
-	sudo unshare --net python3 qa.py loss
+	sudo unshare --net python3 tests/qa.py loss

@@ -6,11 +6,11 @@ role=${1:-}
 
 if [[ "$role" != "server" && "$role" != "client" &&
       ! "$role" =~ ^invite-client[2-6]$ ]]; then
-    echo "Usage: bash run-game-wsl.sh server|client|invite-client2..invite-client6" >&2
+    echo "Usage: bash scripts/run-game-wsl.sh server|client|invite-client2..invite-client6" >&2
     exit 2
 fi
 
-project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$project_dir"
 . /etc/os-release
 build_fingerprint="${ID:-linux}:${VERSION_ID:-unknown}:CycloneDDS"
@@ -109,7 +109,7 @@ done
 if [[ "$role" == invite-client* ]]; then
     command -v gpg >/dev/null 2>&1 || install_apt_packages gnupg
     player=${role#invite-}
-    exec bash "$project_dir/make-invite.sh" "$player"
+    exec bash "$project_dir/scripts/make-invite.sh" "$player"
 fi
 
 if [[ "$role" == "server" ]]; then
@@ -154,7 +154,7 @@ elif compgen -G 'invites/coinrush-client*.tar.gz.gpg' >/dev/null; then
     command -v gpg >/dev/null 2>&1 || install_apt_packages gnupg
     export COINRUSH_AUTO_JOIN=1
     echo "Importing the encrypted client identity. Enter its invite passphrase."
-    exec bash "$project_dir/join-invite.sh" "${invite_files[0]}"
+    exec bash "$project_dir/scripts/join-invite.sh" "${invite_files[0]}"
 elif [[ -r credentials-private/client1/identity.key ]]; then
     # Also support a host that started ./server manually instead of server.bat.
     :

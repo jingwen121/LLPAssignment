@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "WSL_DISTRO=%~1"
 set "GAME_ROLE=%~2"
@@ -50,8 +50,8 @@ if defined LOCALAPPDATA (
 
 echo Starting Coin Rush %GAME_ROLE% in WSL distro "%WSL_DISTRO%"...
 rem WSL distro names have no spaces; pass the registered name as one unquoted token.
-rem This mirrors: wsl --distribution Ubuntu-26.04 --exec bash run-game-wsl.sh server
-wsl.exe --distribution %WSL_DISTRO% --exec bash run-game-wsl.sh %GAME_ROLE%
+rem This mirrors: wsl --distribution Ubuntu-26.04 --exec bash scripts/run-game-wsl.sh server
+wsl.exe --distribution %WSL_DISTRO% --exec bash scripts/run-game-wsl.sh %GAME_ROLE%
 if errorlevel 1 goto :fail
 exit /b 0
 

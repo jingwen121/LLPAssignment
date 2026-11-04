@@ -4,7 +4,7 @@ umask 077
 
 archive=${1:-}
 if [[ -z "$archive" || ! -f "$archive" ]]; then
-    echo "Usage: bash join-invite.sh /path/to/coinrush-clientN.tar.gz.gpg" >&2
+    echo "Usage: bash scripts/join-invite.sh /path/to/coinrush-clientN.tar.gz.gpg" >&2
     exit 2
 fi
 command -v gpg >/dev/null || { echo 'Install GnuPG first: sudo apt install gnupg' >&2; exit 1; }

@@ -16,7 +16,7 @@ import tempfile
 import time
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "build" / "qa"
 TRUSTED = WORK / "trusted"
 FOREIGN = WORK / "foreign"
@@ -71,7 +71,7 @@ def prepare():
     # rerunning QA cannot silently invalidate the real team's certificate set
     for directory in (TRUSTED, FOREIGN):
         if not directory.exists():
-            run(["bash", "security.sh", directory], f"create-{directory.name}.log")
+            run(["bash", "scripts/security.sh", directory], f"create-{directory.name}.log")
     os.environ["CYCLONEDDS_URI"] = LOCAL_DDS
     versions = subprocess.check_output(
         ["pkg-config", "--modversion", "CycloneDDS", "glfw3"], text=True).splitlines()
@@ -89,7 +89,7 @@ def checks():
     # A path with spaces catches shell-quoting mistakes before a teammate hits one
     with tempfile.TemporaryDirectory(prefix="issuance-", dir=WORK) as temporary:
         directory = Path(temporary) / "keys with spaces"
-        run(["bash", "security.sh", directory], "fresh-issuance.log")
+        run(["bash", "scripts/security.sh", directory], "fresh-issuance.log")
         ca = directory / "authority" / "ca.pem"
         run(["openssl", "verify", "-CAfile", ca, directory / "server" / "identity.pem",
              directory / "client1" / "identity.pem"], "certificate-chain.log")
@@ -110,7 +110,7 @@ def checks():
 
     # An existing output path must fail without changing any private key bytes
     original = (TRUSTED / "authority" / "ca.key").read_bytes()
-    run(["bash", "security.sh", TRUSTED], "no-overwrite.log", expected=1)
+    run(["bash", "scripts/security.sh", TRUSTED], "no-overwrite.log", expected=1)
     require((TRUSTED / "authority" / "ca.key").read_bytes() == original,
             "Credential generator changed an existing CA key")
 
@@ -183,7 +183,7 @@ def cpu_sample(process):
 def profile():
     # Remove only the DDS polling sleep in the control build; the game must keep
     # its fixed tick interval so the comparison does not change game speed
-    source = (ROOT / "server.c").read_text()
+    source = (ROOT / "src" / "server.c").read_text()
     sleep = "dds_sleepfor(DDS_MSECS(3));"
     require(source.count(sleep) == 1, "Update the polling experiment for the changed worker")
     busy_source = WORK / "server-busy.c"
@@ -192,7 +192,7 @@ def profile():
         ["pkg-config", "--cflags", "--libs", "CycloneDDS"], text=True))
     busy = WORK / "server-busy"
     run(["gcc", "-std=c11", "-D_DEFAULT_SOURCE", "-O2", "-g", "-Wall", "-Wextra",
-         "-Wpedantic", "-I.", "-Ibuild", busy_source, "game.c", "network.c", "build/messages.c",
+         "-Wpedantic", "-Iinclude", "-Ivendor", "-Ibuild", busy_source, "src/game.c", "src/network.c", "build/messages.c",
          "-o", busy, *flags, "-pthread", "-lcrypto"], "profile-build.log")
 
     results = {}
@@ -356,7 +356,7 @@ def loss():
 
 def main():
     require(len(sys.argv) == 2 and sys.argv[1] in ("check", "sanitize", "profile", "wire", "loss"),
-            "Usage: python3 qa.py check|sanitize|profile|wire|loss")
+            "Usage: python3 tests/qa.py check|sanitize|profile|wire|loss")
     os.chdir(ROOT)
     prepare()
     mode = sys.argv[1]

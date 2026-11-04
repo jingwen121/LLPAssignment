@@ -4,7 +4,7 @@ umask 077
 
 player=${1:-}
 if [[ ! "$player" =~ ^client[2-6]$ ]]; then
-    echo "Usage: bash make-invite.sh client2|client3|client4|client5|client6" >&2
+    echo "Usage: bash scripts/make-invite.sh client2|client3|client4|client5|client6" >&2
     exit 2
 fi
 command -v gpg >/dev/null || { echo 'Install GnuPG first: sudo apt install gnupg' >&2; exit 1; }

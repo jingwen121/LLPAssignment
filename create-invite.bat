@@ -14,5 +14,5 @@ if /i "%PLAYER%"=="CLIENT4" set "PLAYER=client4"
 if /i "%PLAYER%"=="CLIENT5" set "PLAYER=client5"
 if /i "%PLAYER%"=="CLIENT6" set "PLAYER=client6"
 
-call "%~dp0run-game.bat" "%~2" "invite-%PLAYER%"
+call "%~dp0scripts\run-game.bat" "%~2" "invite-%PLAYER%"
 exit /b %ERRORLEVEL%
