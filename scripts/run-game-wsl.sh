@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly EXPECTED_CYCLONEDDS_VERSION="0.10.5"
+readonly EXPECTED_CYCLONEDDS_VERSION="0.10.4 or 0.10.5"
 role=${1:-}
 
 if [[ "$role" != "server" && "$role" != "client" &&
@@ -44,7 +44,7 @@ install_apt_packages() {
 }
 
 actual_version=$(pkg-config --modversion CycloneDDS 2>/dev/null || true)
-if [[ "$actual_version" != "$EXPECTED_CYCLONEDDS_VERSION" ]]; then
+if [[ "$actual_version" != "0.10.4" && "$actual_version" != "0.10.5" ]]; then
     echo "Refusing to launch: Cyclone DDS $EXPECTED_CYCLONEDDS_VERSION is required." >&2
     echo "This WSL distro reports '${actual_version:-not installed}'." >&2
     echo "Choose a WSL distro that provides Cyclone DDS $EXPECTED_CYCLONEDDS_VERSION." >&2
@@ -152,7 +152,7 @@ elif compgen -G 'invites/coinrush-client*.tar.gz.gpg' >/dev/null; then
         exit 1
     fi
     command -v gpg >/dev/null 2>&1 || install_apt_packages gnupg
-    export COINRUSH_AUTO_JOIN=1
+    unset COINRUSH_AUTO_JOIN
     echo "Importing the encrypted client identity. Enter its invite passphrase."
     exec bash "$project_dir/scripts/join-invite.sh" "${invite_files[0]}"
 elif [[ -r credentials-private/client1/identity.key ]]; then
@@ -164,6 +164,6 @@ else
     exit 1
 fi
 
-export COINRUSH_AUTO_JOIN=1
-echo "Cyclone DDS $actual_version verified; connecting to quick-play room."
+unset COINRUSH_AUTO_JOIN
+echo "Cyclone DDS $actual_version verified; opening Create Room / Join Room."
 exec "$project_dir/client"

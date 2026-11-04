@@ -13,7 +13,7 @@ if not defined WSL_DISTRO (
 if not defined WSL_DISTRO (
     echo Installed WSL distributions:
     wsl.exe --list --quiet
-    set /p "WSL_DISTRO=Enter a distro with Cyclone DDS 0.10.5: "
+    set /p "WSL_DISTRO=Enter a distro with Cyclone DDS 0.10.4 or 0.10.5: "
 )
 
 if not defined WSL_DISTRO (
