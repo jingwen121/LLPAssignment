@@ -71,9 +71,11 @@ if [[ "$subject" != "subject=CN=$player" ]] ||
     exit 1
 fi
 
-mkdir -p credentials-invites
-chmod 700 credentials-invites
-destination="credentials-invites/$player"
+data_home=${XDG_DATA_HOME:-${HOME:?HOME is required for private credential storage}/.local/share}
+credential_store="$data_home/coinrush/credentials-invites"
+mkdir -p "$credential_store"
+chmod 700 "$data_home/coinrush" "$credential_store"
+destination="$credential_store/$player"
 if [[ -e "$destination" ]]; then
     echo "$destination already exists; remove the old invite before importing another." >&2
     exit 1
@@ -81,11 +83,11 @@ fi
 chmod 700 "$credential_dir"
 chmod 600 "$credential_dir"/*
 mv -- "$credential_dir" "$destination"
-printf '%s\n' "${player#client}" > credentials-invites/.default-player.tmp
-chmod 600 credentials-invites/.default-player.tmp
-mv -f -- credentials-invites/.default-player.tmp credentials-invites/default-player
+printf '%s\n' "${player#client}" > "$credential_store/.default-player.tmp"
+chmod 600 "$credential_store/.default-player.tmp"
+mv -f -- "$credential_store/.default-player.tmp" "$credential_store/default-player"
 
-printf 'Imported %s. The next bare ./client launch will use this invited identity.\n' "$player"
+printf 'Imported %s into private WSL user storage.\n' "$player"
 if [[ -x ./client ]]; then
     exec ./client
 fi

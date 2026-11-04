@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* x86/x86-64 builds use explicit SSE2 for player-vs-object collision checks.
+ * Other architectures keep the same scalar implementation and behavior. */
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 /* ======================================================================
  * Helpers
  * ====================================================================== */
@@ -26,7 +32,18 @@ static bool rects_overlap(int ax, int ay, int aw, int ah,
 static int count_gold(const Game *g)
 {
     int n = 0;
-    for (int i = 0; i < MAX_COINS; i++)
+    int i = 0;
+
+    /* Four-way source unrolling reduces loop overhead and the dependency
+     * chain in this small, frequently-used fixed-size count. */
+    for (; i + 3 < MAX_COINS; i += 4)
+    {
+        if (g->coins[i].active && g->coins[i].gold)  n++;
+        if (g->coins[i + 1].active && g->coins[i + 1].gold)  n++;
+        if (g->coins[i + 2].active && g->coins[i + 2].gold)  n++;
+        if (g->coins[i + 3].active && g->coins[i + 3].gold)  n++;
+    }
+    for (; i < MAX_COINS; ++i)
         if (g->coins[i].active && g->coins[i].gold)  n++;
     return n;
 }
@@ -126,17 +143,31 @@ static void move_players(Game *g, uint64_t now_ms)
 }
 
 /* Coins fall; any coin that leaves the bottom respawns at the top. */
+static inline void move_one_coin(Game *g, Coin *c)
+{
+    if (!c->active)
+        return;
+    c->y += c->speed;
+    if (c->y > HEIGHT)
+        spawn_coin(g, c, false);
+}
+
 static void move_coins(Game *g)
 {
-    for (int i = 0; i < MAX_COINS; i++)
+    int i = 0;
+
+    /* Manually unroll four coin updates per iteration. Keep the updates
+     * in index order because a respawn consumes the shared RNG sequence. */
+    for (; i + 3 < MAX_COINS; i += 4)
     {
-        Coin *c = &g->coins[i];
-        if (!c->active)
-            continue;
-        c->y += c->speed;
-        if (c->y > HEIGHT)
-            spawn_coin(g, c, false);
+        move_one_coin(g, &g->coins[i]);
+        move_one_coin(g, &g->coins[i + 1]);
+        move_one_coin(g, &g->coins[i + 2]);
+        move_one_coin(g, &g->coins[i + 3]);
     }
+
+    for (; i < MAX_COINS; ++i)
+        move_one_coin(g, &g->coins[i]);
 }
 
 static void move_bombs(Game *g)
@@ -155,6 +186,90 @@ static void move_bombs(Game *g)
     }
 }
 
+/* Return the lowest player index whose rectangle overlaps an object.
+ * Four player rectangles are checked together with SSE2 on x86/x86-64;
+ * unsupported architectures use the equivalent scalar path. The lowest
+ * set lane is selected to preserve the game's lower-player-ID priority. */
+static int find_overlapping_player(const Game *g, int object_x, int object_y,
+                                   int object_size, uint64_t now_ms,
+                                   bool enforce_bomb_cooldown)
+{
+    int i = 0;
+
+#if defined(__SSE2__)
+    for (; i + 3 < MAX_PLAYERS; i += 4)
+    {
+        int player_left[4] = {0, 0, 0, 0};
+        int player_right[4] = {0, 0, 0, 0};
+        int player_top[4] = {0, 0, 0, 0};
+        int player_bottom[4] = {0, 0, 0, 0};
+        int eligible[4] = {0, 0, 0, 0};
+
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            const Player *p = &g->players[i + lane];
+            bool ready = p->active && p->lives > 0;
+            if (ready && enforce_bomb_cooldown && p->last_bomb_hit_ms != 0 &&
+                now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS)
+                ready = false;
+
+            if (ready)
+            {
+                player_left[lane] = p->x;
+                player_right[lane] = p->x + PLAYER_W;
+                player_top[lane] = p->y;
+                player_bottom[lane] = p->y + PLAYER_H;
+                eligible[lane] = -1;
+            }
+        }
+
+        const __m128i left = _mm_loadu_si128((const __m128i *)player_left);
+        const __m128i right = _mm_loadu_si128((const __m128i *)player_right);
+        const __m128i top = _mm_loadu_si128((const __m128i *)player_top);
+        const __m128i bottom = _mm_loadu_si128((const __m128i *)player_bottom);
+        const __m128i valid = _mm_loadu_si128((const __m128i *)eligible);
+
+        __m128i overlap = _mm_cmplt_epi32(left,
+                                           _mm_set1_epi32(object_x + object_size));
+        overlap = _mm_and_si128(overlap,
+                                 _mm_cmplt_epi32(_mm_set1_epi32(object_x), right));
+        overlap = _mm_and_si128(overlap,
+                                 _mm_cmplt_epi32(top,
+                                                 _mm_set1_epi32(object_y + object_size)));
+        overlap = _mm_and_si128(overlap,
+                                 _mm_cmplt_epi32(_mm_set1_epi32(object_y), bottom));
+        overlap = _mm_and_si128(overlap, valid);
+
+        unsigned lanes = (unsigned)_mm_movemask_ps(_mm_castsi128_ps(overlap));
+        if (lanes != 0)
+        {
+#if defined(__GNUC__) || defined(__clang__)
+            return i + __builtin_ctz(lanes);
+#else
+            for (int lane = 0; lane < 4; ++lane)
+                if (lanes & (1u << lane)) return i + lane;
+#endif
+        }
+    }
+#endif
+
+    /* Scalar tail (one player for the current five-player limit), also used
+     * as the complete implementation on non-SSE2 architectures. */
+    for (; i < MAX_PLAYERS; ++i)
+    {
+        const Player *p = &g->players[i];
+        if (!p->active || p->lives <= 0)
+            continue;
+        if (enforce_bomb_cooldown && p->last_bomb_hit_ms != 0 &&
+            now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS)
+            continue;
+        if (rects_overlap(p->x, p->y, PLAYER_W, PLAYER_H,
+                          object_x, object_y, object_size, object_size))
+            return i;
+    }
+    return -1;
+}
+
 /* Player vs coin collision. Lower player IDs are checked first, so if two
    players touch the same coin in the same tick, the lower ID gets it. */
 static void check_catches(Game *g)
@@ -164,30 +279,20 @@ static void check_catches(Game *g)
         Coin *coin = &g->coins[c];
         if (!coin->active)
             continue;
+        int player_index = find_overlapping_player(g, coin->x, coin->y,
+                                                   coin->size, 0, false);
+        if (player_index < 0)
+            continue;
 
-        for (int i = 0; i < MAX_PLAYERS; i++)
-        {
-            Player *p = &g->players[i];
+        Player *p = &g->players[player_index];
+        p->score += coin->value;
+        ++p->collect_seq;
+        printf("Player %d caught a %s coin (+%d) -> score %d\n",
+               player_index + 1, coin->gold ? "GOLD" : "normal",
+               coin->value, p->score);
 
-            // Skip empty slots: nobody has joined with this ID
-            if (!p->active || p->lives <= 0)
-                continue;
-
-            /* Collision test */
-            if (rects_overlap(p->x, p->y, PLAYER_W, PLAYER_H,
-                              coin->x, coin->y, coin->size, coin->size))
-            {
-                p->score += coin->value;
-                ++p->collect_seq;
-                printf("Player %d caught a %s coin (+%d) -> score %d\n",
-                       i + 1, coin->gold ? "GOLD" : "normal", coin->value, p->score);
-
-                // The caught coin disappears and comes back as a new coin
-                // at the top of the screen (may now be gold or normal)
-                spawn_coin(g, coin, false);
-                break;   /* coin is gone, move on to the next coin */
-            }
-        }
+        /* Respawn after selecting the lowest-ID overlapping player. */
+        spawn_coin(g, coin, false);
     }
 }
 
@@ -201,25 +306,17 @@ static void check_bomb_hits(Game *g, uint64_t now_ms)
         Bomb *bomb = &g->bombs[b];
         if (!bomb->active)
             continue;
+        int player_index = find_overlapping_player(g, bomb->x, bomb->y,
+                                                   bomb->size, now_ms, true);
+        if (player_index < 0)
+            continue;
 
-        for (int i = 0; i < MAX_PLAYERS; ++i)
-        {
-            Player *p = &g->players[i];
-            if (!p->active || p->lives <= 0 ||
-                (p->last_bomb_hit_ms != 0 &&
-                 now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS))
-                continue;
-
-            if (!rects_overlap(p->x, p->y, PLAYER_W, PLAYER_H,
-                               bomb->x, bomb->y, bomb->size, bomb->size))
-                continue;
-
-            --p->lives;
-            p->last_bomb_hit_ms = now_ms;
-            printf("Player %d hit a bomb -> %d lives left\n", i + 1, p->lives);
-            spawn_bomb(g, bomb, false);
-            break;
-        }
+        Player *p = &g->players[player_index];
+        --p->lives;
+        p->last_bomb_hit_ms = now_ms;
+        printf("Player %d hit a bomb -> %d lives left\n",
+               player_index + 1, p->lives);
+        spawn_bomb(g, bomb, false);
     }
 }
 

@@ -897,12 +897,17 @@ static void draw_connecting(uint32_t room_code, bool create_room)
 {
     draw_menu_background();
     glColor3f(0.43f, 0.88f, 0.92f);
-    draw_centered(ARENA_W * 0.5f, 172, 2.8f, create_room ? "CREATING ROOM" : "JOINING ROOM");
+    bool quick_play = room_code == NET_QUICKPLAY_ROOM_CODE;
+    draw_centered(ARENA_W * 0.5f, 172, 2.8f,
+                  quick_play ? "CONNECTING TO GAME" :
+                  (create_room ? "CREATING ROOM" : "JOINING ROOM"));
     glColor3f(0.04f, 0.065f, 0.11f); draw_rect(186, 235, 428, 184);
     char code[48]; snprintf(code, sizeof(code), "ROOM CODE  %06u", room_code);
     glColor3f(1.0f, 0.83f, 0.42f); draw_centered(ARENA_W * 0.5f, 279, 1.8f, code);
     glColor3f(0.70f, 0.79f, 0.89f); draw_centered(ARENA_W * 0.5f, 336, 1.15f, "Finding the room server...");
-    draw_centered(ARENA_W * 0.5f, 368, 1.0f, "Share this code so friends can join your game.");
+    draw_centered(ARENA_W * 0.5f, 368, 1.0f,
+                  quick_play ? "Joining the server quick-play room..." :
+                               "Share this code so friends can join your game.");
 }
 
 static void start_room_request(uint32_t room_code, bool create_room)
@@ -1083,8 +1088,35 @@ static bool acquire_identity_lock(int identity)
 static const char *select_default_credentials(void)
 {
 #if defined(__linux__)
-    static char selected[160];
-    FILE *preference = fopen("credentials-invites/default-player", "r");
+    static char selected[4096];
+    char credential_root[4096] = "";
+    char preference_path[4096] = "";
+    const char *data_home = getenv("XDG_DATA_HOME");
+    const char *home = getenv("HOME");
+    if (data_home && data_home[0])
+    {
+        snprintf(credential_root, sizeof(credential_root),
+                 "%s/coinrush/credentials-invites", data_home);
+        snprintf(preference_path, sizeof(preference_path), "%s/default-player",
+                 credential_root);
+    }
+    else if (home && home[0])
+    {
+        snprintf(credential_root, sizeof(credential_root),
+                 "%s/.local/share/coinrush/credentials-invites", home);
+        snprintf(preference_path, sizeof(preference_path), "%s/default-player",
+                 credential_root);
+    }
+
+    FILE *preference = preference_path[0] ? fopen(preference_path, "r") : NULL;
+    if (!preference)
+    {
+        /* Compatibility with invites imported by older project versions. */
+        snprintf(credential_root, sizeof(credential_root), "credentials-invites");
+        snprintf(preference_path, sizeof(preference_path),
+                 "credentials-invites/default-player");
+        preference = fopen(preference_path, "r");
+    }
     if (preference)
     {
         int identity = 0;
@@ -1092,11 +1124,11 @@ static const char *select_default_credentials(void)
         fclose(preference);
         if (!valid)
         {
-            fprintf(stderr, "Invalid credentials-invites/default-player setting.\n");
+            fprintf(stderr, "Invalid imported client identity setting.\n");
             return NULL;
         }
-        snprintf(selected, sizeof(selected), "credentials-invites/client%d", identity);
-        char certificate[192];
+        snprintf(selected, sizeof(selected), "%s/client%d", credential_root, identity);
+        char certificate[sizeof(selected) + 16];
         snprintf(certificate, sizeof(certificate), "%s/identity.pem", selected);
         if (access(certificate, R_OK) != 0)
         {
@@ -1115,7 +1147,7 @@ static const char *select_default_credentials(void)
 
     for (int identity = 1; identity <= MAX_PLAYERS; ++identity) {
         snprintf(selected, sizeof(selected), "credentials-private/client%d", identity);
-        char certificate[192];
+        char certificate[sizeof(selected) + 16];
         snprintf(certificate, sizeof(certificate), "%s/identity.pem", selected);
         if (access(certificate, R_OK) != 0)
             continue;
@@ -1178,6 +1210,16 @@ int main(int argc, char **argv)
     glfwSetCharCallback(window, character_callback);
     glfwSetKeyCallback(window, key_callback);
 
+    /* The Windows client launcher sets this after provisioning a signed
+     * client identity. All such clients meet in the server's reserved room. */
+    const char *auto_join = getenv("COINRUSH_AUTO_JOIN");
+    if (auto_join && strcmp(auto_join, "1") == 0)
+    {
+        fprintf(stderr, "Connecting to quick-play room %06d...\n",
+                NET_QUICKPLAY_ROOM_CODE);
+        start_room_request(NET_QUICKPLAY_ROOM_CODE, true);
+    }
+
     bool previous_mouse_down = false;
     while (!glfwWindowShouldClose(window))
     {
@@ -1192,7 +1234,8 @@ int main(int argc, char **argv)
         {
             if (point_in_rect(mx, my, 278, 244, 244, 56))
             {
-                uint32_t room_code = 100000u + (uint32_t)(rand() % 900000);
+                uint32_t room_code = (uint32_t)NET_QUICKPLAY_ROOM_CODE + 1u +
+                                     (uint32_t)(rand() % 899999);
                 start_room_request(room_code, true);
             }
             else if (point_in_rect(mx, my, 278, 318, 244, 56))

@@ -25,6 +25,33 @@ For a clean rebuild:
 make clean && make
 ```
 
+### Low-level optimizations
+
+The server uses explicit SSE2 integer comparisons to check up to four player
+rectangles against each falling coin or bomb at once on x86/x86-64. It keeps a
+scalar tail and a scalar-only fallback on other CPU architectures. The fixed
+coin update and gold-count loops are manually unrolled four items at a time.
+These optimizations preserve player-ID collision priority and coin respawn
+order. The game has small fixed limits (five players and eight coins), so the
+SIMD path demonstrates vector processing but should be benchmarked before
+claiming a measurable frame-rate or CPU-time improvement.
+
+### Windows WSL launchers
+
+Double-click `server.bat` on the host PC and `client.bat` on each player PC.
+The first launch asks for a WSL distro with Cyclone DDS 0.10.5 and remembers
+that choice for that Windows account. Later launches only need the relevant
+batch file. The server window stays open while the host is running. The client
+launcher builds the client, securely imports that PC's invite on first launch,
+and connects automatically to quick-play room `100000`. All clients use that
+reserved room; the server creates it when the first client arrives. The normal
+room-code UI remains available when starting `./client` directly.
+
+The first build verifies Cyclone DDS 0.10.5 and the linked runtime library, and
+rebuilds when the Linux distro or DDS release changes. Each PC still needs its
+own local WSL build and working WSLg graphics. For LAN discovery, follow the
+mirrored networking and firewall setup below.
+
 To launch a local demo with a server and first client in one terminal:
 
 ```sh
@@ -43,31 +70,31 @@ With no credential argument, each `./client` process takes the first locally
 available signed identity in launch order. An OS file lock prevents two local
 clients from selecting the same identity, and closing a client releases it.
 
-For a remote player, the host creates a unique encrypted invite. If the host
-uses the default `client1`, run:
+#### Secure one-time player setup
+
+Each remote player needs a distinct certificate signed by the host's local
+authority. On the host, after the first `server.bat` setup, double-click
+`create-invite.bat` and choose `client2` through `client6`. The script creates
+an AES-encrypted invite and asks for a passphrase. Alternatively, from WSL:
 
 ```sh
 make invite PLAYER=client2
 ```
 
-Send the generated `invites/coinrush-client2.tar.gz.gpg` file over a private
-share and give its passphrase through a separate channel. Make a different
-invite for each friend. Never send `credentials-private/authority` or its CA
-private key.
+Put the encrypted `.gpg` file in the friend's project folder under `invites/`
+(or send it separately and have them place it there). Give the passphrase over
+a separate channel. Make a different invite for every player. The friend
+double-clicks `client.bat`; the first launch verifies/imports the invite and
+asks for its passphrase, then automatically joins quick-play. Later launches
+only need `client.bat`.
 
-After extracting the assignment and running `make`, the friend copies the
-invite archive into the project directory and runs:
-
-```sh
-bash join-invite.sh coinrush-client2.tar.gz.gpg
-```
-
-The importer verifies the signed identity and DDS permissions, stores only the
-invited client credential, and starts `./client` with that identity selected.
-The friend then chooses **Join a Room** and enters the room code. Locally
-generated credentials from the friend's own `make` are not used for this host,
-because they are signed by a different authority. All machines still need to
-discover the same Cyclone DDS server on the network.
+The invite contains only that player's encrypted credential. It is imported
+into the player's private WSL home data directory with restricted file
+permissions, outside the shared project folder. Never send the plaintext
+`credentials-private/` directory, the server identity, or
+`credentials-private/authority/ca.key`.
+The encrypted invite can be included in a project zip; its passphrase must be
+shared separately. Each invite is valid only for its matching host authority.
 
 ### Connect between two WSL computers on a LAN
 
@@ -82,9 +109,8 @@ create that section if the file is new:
 networkingMode=mirrored
 ```
 
-Then run `wsl --shutdown` in PowerShell on each PC, reopen Ubuntu, and run
-`make` in the project directory on both computers. Restart the host's `./server`
-and clients, then try the room code again. The program sets Cyclone DDS to use
+Then run `wsl --shutdown` in PowerShell on each PC and reopen Ubuntu. Start the
+host with `server.bat` and each player with `client.bat`. The program sets Cyclone DDS to use
 automatic participant indices (0–15), allowing a local server and clients to
 coexist and making its discovery port range predictable. The normal
 certificate authentication, signed permissions and encrypted DDS traffic

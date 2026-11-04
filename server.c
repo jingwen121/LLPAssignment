@@ -14,7 +14,7 @@
 
 #define MAX_ROOMS 8
 #define MAX_BATCH 16
-#define FIRST_ROOM_CODE 100000
+#define FIRST_ROOM_CODE 100001
 #define LAST_ROOM_CODE 999999
 
 _Static_assert(MAX_ROOMS == NET_ROOMS, "Room capacities must match");
@@ -182,8 +182,10 @@ static void *dds_worker(void *credentials)
             int existing = find_room(request->room_code);
             if (request->create_room)
             {
-                if (existing < 0 && request->room_code >= FIRST_ROOM_CODE &&
-                    request->room_code <= LAST_ROOM_CODE)
+                if (existing < 0 &&
+                    ((request->room_code == NET_QUICKPLAY_ROOM_CODE) ||
+                     (request->room_code >= FIRST_ROOM_CODE &&
+                      request->room_code <= LAST_ROOM_CODE)))
                 {
                     room_index = create_room(request->room_code);
                     if (room_index >= 0)
@@ -192,6 +194,14 @@ static void *dds_worker(void *credentials)
                         g_rooms[room_index].network = net;
                         g_rooms[room_index].network.room_code = request->room_code;
                     }
+                }
+                else if (existing >= 0 &&
+                         request->room_code == NET_QUICKPLAY_ROOM_CODE)
+                {
+                    /* Every authenticated quick-play client uses the same
+                     * reserved room. The first request creates it; later
+                     * clients join it without sharing a room-code prompt. */
+                    room_index = existing;
                 }
                 else if (existing >= 0 && find_token(&g_rooms[existing], request->client_token))
                     room_index = existing; /* safe retry of the same create request */

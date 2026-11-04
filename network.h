@@ -13,6 +13,7 @@
 #define NET_DOMAIN 42
 #define NET_ROOMS 8
 #define NET_IDENTITIES 6
+#define NET_QUICKPLAY_ROOM_CODE 100000
 
 // These are monotonic nanoseconds; neither timeout depends on the wall clock
 // The server applies the movement limit even if a client removes its own limiter
