@@ -39,15 +39,15 @@ claiming a measurable frame-rate or CPU-time improvement.
 ### Windows WSL launchers
 
 Double-click `server.bat` on the host PC and `client.bat` on each player PC.
-The first launch asks for a WSL distro with Cyclone DDS 0.10.5 and remembers
+The first launch asks for a WSL distro with Cyclone DDS 0.10.4 or 0.10.5 and remembers
 that choice for that Windows account. Later launches only need the relevant
 batch file. The server window stays open while the host is running. The client
 launcher builds the client, securely imports that PC's invite on first launch,
-and connects automatically to quick-play room `100000`. All clients use that
-reserved room; the server creates it when the first client arrives. The normal
-room-code UI remains available when starting `./client` directly.
+and opens the Create Room / Join Room menu. One player creates a room and shares
+its six-digit code; others join with that code. Every connected player presses
+Ready before the first match starts, with at least two players required.
 
-The first build verifies Cyclone DDS 0.10.5 and the linked runtime library, and
+The first build verifies Cyclone DDS 0.10.4 or 0.10.5 and the linked runtime library, and
 rebuilds when the Linux distro or DDS release changes. Each PC still needs its
 own local WSL build and working WSLg graphics. For LAN discovery, follow the
 mirrored networking and firewall setup below.
@@ -59,6 +59,11 @@ make run
 ```
 
 ## Start a match
+
+Enter a display name in the menu before creating or joining a room. Names can
+contain up to 16 letters, digits, spaces, hyphens or underscores. Names appear
+above players and in the leaderboard; certificate identities remain private
+connection identities and cannot be replaced by choosing someone else's name.
 
 After `make`, start `./server` in the first WSL terminal. In a second terminal,
 run `./client` and choose **Create Room**. In each additional terminal, run
@@ -85,7 +90,7 @@ Put the encrypted `.gpg` file in the friend's project folder under `invites/`
 (or send it separately and have them place it there). Give the passphrase over
 a separate channel. Make a different invite for every player. The friend
 double-clicks `client.bat`; the first launch verifies/imports the invite and
-asks for its passphrase, then automatically joins quick-play. Later launches
+asks for its passphrase, then opens Create Room / Join Room. Later launches
 only need `client.bat`.
 
 The invite contains only that player's encrypted credential. It is imported
@@ -133,7 +138,7 @@ terminal prints `Using imported player identity client2` before starting
 `./client`.
 
 The server supports up to eight rooms with up to five players in each room.
-At least two players start a round. Close a client window to leave its room.
+At least two players and unanimous ready votes are required to start a round. Close a client window to leave its room.
 Clients must be able to discover the same Cyclone DDS server on the network.
 
 The automatic identity choice is local convenience only; DDS certificate
@@ -141,6 +146,9 @@ authentication, signed topic permissions, session tokens and sequence checks
 continue to protect network play.
 
 ## Controls
+
+- In name and room-code fields, hold Backspace to delete repeatedly, or use
+  Ctrl+A to select all and type to replace it (Backspace/Delete clears the selection).
 
 - Use the left/right arrow keys or A/D to move.
 - Press F11 to enter or leave fullscreen; Escape still opens the in-game exit menu.
@@ -151,11 +159,15 @@ continue to protect network play.
 - Use **Exit Game** in the main menu, or press Escape during a match, to open
   the exit confirmation. Confirming closes the client and removes that player
   from the room; cancel returns to the previous screen.
-- At the Level 1 intermission, click **Continue to Level 2** or press Enter;
-  the server advances the whole room together.
-- Level 1 and Level 2 play their respective bundled MP3 tracks. In the game
-  HUD's upper-right corner, click **SND/OFF** to mute or unmute and use **−/+**
-  to adjust the music volume.
+- At each level intermission, click **Continue to the next level** or press Enter;
+  your green checkmark and ready count confirm your vote. Every connected player
+  must vote before the room advances.
+- Each level and the bonus round play their matching bundled MP3 track. Coin
+  pickups and bomb hits play retro sound effects. In the game
+  HUD's upper-right corner, click the **speaker icon** to mute or unmute and use **−/+**
+  to adjust music and sound-effect volume. You can also click the volume bars.
+  Music is mixed below the effects. Only the focused client window plays audio,
+  so multiple local players do not stack their music.
 
 ## Graphics and game screens
 
@@ -170,13 +182,19 @@ continue to protect network play.
   each player has a separate tint and faces left or right as they move.
 - The HUD, falling coins, scores, timer and player positions use the latest
   authoritative room snapshot from the server.
-- Each round has two 30-second levels. Level 1 is the original coin-only mode.
-  It ends at a shared **Level 1 Complete** screen; any player can continue the
-  room to Level 2. Level 2 increases coin speed and introduces falling bombs
-  and three heart lives per player. Bomb hits cost one life, and eliminated
-  players stop collecting coins. The winner screen appears when Level 2 ends.
-  Hearts, bomb animation and coin pickup plus effects use the sprites in
-  `assets/effects/`.
+- Each match has three 30-second levels, with shared Continue screens between them.
+  Click Continue or press Enter to vote ready. A green checkmark confirms your
+  vote and the ready count shows progress (for example, 1/3). Every connected
+  player must confirm; duplicate clicks count once. Departed players are removed
+  from the count, and votes reset for each new level or match.
+  Level 1 introduces coins. Level 2 adds faster coins and bombs. Bombs deduct
+  3 points (minimum zero), with a 900 ms hit cooldown. Nobody is eliminated.
+  Level 3 adds red floor warnings, tempting gold coins and bomb bursts after
+  1.5 seconds. Warnings become more frequent in the final 10 seconds.
+- Scores carry across all three levels. A first-place tie starts a 15-second
+  coin-only bonus round for tied leaders; other players spectate. Bonus points
+  are separate from match totals. Further ties replay among the tied bonus leaders.
+- The final screen ranks every connected player and marks the winner. It waits until every connected player confirms the next round. Each level and the bonus round use their matching MP3 in `assets/music/`.
 - Players can pass through one another. Coins are clipped to the playfield below
   the HUD, including after the window is resized.
 - On WSLg, the client uses Mesa software OpenGL with two worker threads and
@@ -187,7 +205,23 @@ Secure channels use separate certificate identities; each identity may hold
 Give each remote player a distinct credential directory.
 
 After updating from shared DDS topics, generate a new credential set in a new
-folder with `bash security.sh credentials-private`; old signed permissions cannot
+folder with `bash scripts/security.sh credentials-private`; old signed permissions cannot
 access the private channels. Start the server with
 `./build/server credentials-private/server` and each remote client with its
 corresponding credentials directory. Keep the authority private.
+
+Shared launcher and credential helpers live in `scripts/`. The root launchers
+`server.bat`, `client.bat`, and `create-invite.bat` call them automatically.
+
+## Project layout
+
+- `src/`: client, server, game rules and networking implementations.
+- `include/`: shared game and networking headers.
+- `tests/`: gameplay tests, network validation and the QA runner.
+- `vendor/`: the third-party pixel font header.
+- `protocol/`: DDS message definitions; generated C files stay in `build/`.
+- `scripts/`: WSL launch helpers and credential setup utilities.
+- `assets/`: graphics and music.
+
+Run `make`, `make test`, `make qa`, and `make test-sanitize` from the project root.
+The Windows launchers remain at the top level.
