@@ -68,6 +68,8 @@
 #define HEART_SHEET_HEIGHT 85
 #define LEVEL_ONE_MUSIC_PATH "assets/music/level1.mp3"
 #define LEVEL_TWO_MUSIC_PATH "assets/music/level2.mp3"
+#define LEVEL_THREE_MUSIC_PATH "assets/music/level3.mp3"
+#define BONUS_MUSIC_PATH "assets/music/bonus.mp3"
 
 typedef enum { UI_MAIN_MENU, UI_JOIN_CODE, UI_CONNECTING, UI_GAME, UI_EXIT_CONFIRM } UiScreen;
 
@@ -84,6 +86,7 @@ typedef struct
     uint64_t client_token;
     uint64_t join_started;
     GameState state;
+    char display_name[17];
     bool has_state;
     bool network_failed;
 } ClientData;
@@ -95,6 +98,12 @@ static UiScreen g_screen = UI_MAIN_MENU;
 static char g_room_code_input[7] = "";
 static size_t g_room_code_length;
 static char g_ui_error[80] = "";
+static char g_display_name[17] = "";
+static bool g_name_focused = true;
+static bool g_name_selected;
+static bool g_code_selected;
+static bool g_mouse_clicked;
+static double g_click_x, g_click_y;
 static bool g_exit_from_game = false;
 typedef struct
 {
@@ -135,7 +144,14 @@ static GLuint g_heart_texture;
 static PickupEffect g_pickup_effects[MAX_PLAYERS];
 static Mix_Music *g_level_one_music;
 static Mix_Music *g_level_two_music;
+static Mix_Music *g_level_three_music;
+static Mix_Music *g_bonus_music;
+static Mix_Chunk *g_coin_sound, *g_bomb_sound, *g_tick_sound;
+static uint32_t g_last_bomb_seq[MAX_PLAYERS];
 static bool g_audio_ready;
+static bool g_audio_focused = true;
+#define MUSIC_MIX_PERCENT 30
+#define SOUND_CONTROL_Y 32
 static bool g_music_muted;
 static int g_music_volume = MIX_MAX_VOLUME * 3 / 5;
 static int g_music_track = -1;
@@ -149,6 +165,14 @@ static void apply_music_volume(void)
 {
     if (g_audio_ready)
         Mix_VolumeMusic(g_music_muted ? 0 : g_music_volume);
+}
+
+static void audio_focus_callback(GLFWwindow *window, int focused)
+{
+    (void)window;
+    g_audio_focused = focused == GLFW_TRUE;
+    apply_music_volume();
+    if (!g_audio_focused && g_audio_ready) Mix_HaltChannel(-1);
 }
 
 static void update_game_music(const GameState *state, bool has_state)
@@ -297,7 +321,44 @@ static void draw_text(float x, float y, float scale, const char *text)
 // Measure the font itself so short and long labels share the same centre
 static void draw_centered(float centre, float y, float scale, const char *text)
 {
-    draw_text(centre - stb_easy_font_width((char *)text) * scale * 0.5f, y, scale, text);
+    struct { float x, y, z; unsigned char color[4]; } vertices[4096];
+    int quads = stb_easy_font_print(0, 0, (char *)text, NULL, vertices, sizeof(vertices));
+    if (quads <= 0) return;
+    float left = vertices[0].x, right = left;
+    for (int i = 1; i < quads * 4; ++i) {
+        if (vertices[i].x < left) left = vertices[i].x;
+        if (vertices[i].x > right) right = vertices[i].x;
+    }
+    draw_text(centre - (left + right) * scale * 0.5f, y, scale, text);
+}
+
+static void text_vertical_bounds(const char *text, float *top, float *bottom)
+{
+    struct { float x, y, z; unsigned char color[4]; } vertices[4096];
+    int quads = stb_easy_font_print(0, 0, (char *)text, NULL, vertices, sizeof(vertices));
+    *top = *bottom = 0;
+    if (quads <= 0) return;
+    *top = *bottom = vertices[0].y;
+    for (int i = 1; i < quads * 4; ++i) {
+        if (vertices[i].y < *top) *top = vertices[i].y;
+        if (vertices[i].y > *bottom) *bottom = vertices[i].y;
+    }
+}
+
+static float text_y_at_center(const char *text, float scale, float center)
+{
+    float top, bottom; text_vertical_bounds(text, &top, &bottom);
+    return center - (top + bottom) * scale * 0.5f;
+}
+
+static float menu_origin_y(void)
+{
+    float top, bottom;
+    text_vertical_bounds("COIN RUSH", &top, &bottom);
+    float title_height = (bottom - top) * 3.2f;
+    text_vertical_bounds("UP TO FIVE PLAYERS  |  LEFT / RIGHT TO MOVE", &top, &bottom);
+    float footer_height = bottom - top;
+    return ARENA_H * 0.5f - (350.0f + (footer_height - title_height) * 0.5f) * 0.5f;
 }
 
 static int window_x, window_y, window_w = ARENA_W, window_h = ARENA_H;
@@ -425,30 +486,6 @@ static void draw_bomb(const GameState *state, int i, double now)
                      (float)state->bomb_y[i] - 4.0f, 32.0f, false);
 }
 
-static void draw_lives(const GameState *state, int i)
-{
-    int lives = state->player_lives[i];
-    float x = (float)state->player_x[i] + (float)PLAYER_W * 0.5f - 25.0f;
-    float y = (float)state->player_y[i] - 48.0f;
-    if (lives <= 0)
-    {
-        glColor3f(1.0f, 0.48f, 0.52f);
-        draw_centered((float)state->player_x[i] + (float)PLAYER_W * 0.5f,
-                      y + 1.0f, 1.0f, "OUT");
-        return;
-    }
-    for (int life = 0; life < lives; ++life)
-        if (g_heart_texture)
-            draw_atlas_frame(g_heart_texture, 0, 1, 7, 5, 16,
-                             HEART_SHEET_WIDTH, HEART_SHEET_HEIGHT,
-                             x + (float)life * 17.0f, y, 16.0f, false);
-        else
-        {
-            glColor3f(1.0f, 0.24f, 0.35f);
-            draw_rect(x + (float)life * 17.0f, y + 4.0f, 12.0f, 10.0f);
-        }
-}
-
 static void observe_coin_collects(const GameState *state, double now)
 {
     for (int i = 0; i < MAX_PLAYERS; ++i)
@@ -460,6 +497,7 @@ static void observe_coin_collects(const GameState *state, double now)
             effect->tracked = true;
             effect->was_active = active;
             effect->last_collect_seq = state->player_collect_seq[i];
+            g_last_bomb_seq[i] = state->player_bomb_seq[i];
             continue;
         }
         if (active && state->player_collect_seq[i] != effect->last_collect_seq)
@@ -469,6 +507,13 @@ static void observe_coin_collects(const GameState *state, double now)
             effect->x = (float)state->player_x[i] + (float)PLAYER_W * 0.5f;
             effect->y = (float)state->player_y[i] - 80.0f;
             effect->active = true;
+            if (g_audio_ready && g_coin_sound && g_audio_focused && !g_music_muted && g_music_volume > 0)
+                Mix_PlayChannel(-1, g_coin_sound, 0);
+        }
+        if (active && state->player_bomb_seq[i] != g_last_bomb_seq[i]) {
+            g_last_bomb_seq[i] = state->player_bomb_seq[i];
+            if (g_audio_ready && g_bomb_sound && g_audio_focused && !g_music_muted && g_music_volume > 0)
+                Mix_PlayChannel(-1, g_bomb_sound, 0);
         }
     }
 }
@@ -635,6 +680,12 @@ static void draw_cat(GLuint texture, float x, float y, const float *tint)
     glDisable(GL_TEXTURE_2D);
 }
 
+static const char *player_name(const GameState *state, int i)
+{
+    static const char *fallback[5] = {"Player 1", "Player 2", "Player 3", "Player 4", "Player 5"};
+    return state->player_names[i][0] ? state->player_names[i] : fallback[i];
+}
+
 static void draw_player(const GameState *state, int i, int my_id, int facing,
                         GLuint cat_east, GLuint cat_west)
 {
@@ -645,7 +696,7 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
         return;
     int x = state->player_x[i], y = state->player_y[i];
     const float eliminated_tint[3] = {0.30f, 0.32f, 0.38f};
-    const float *tint = state->player_lives[i] > 0 ? tints[i] : eliminated_tint;
+    const float *tint = state->level == 4 && !(state->contenders & (1 << i)) ? eliminated_tint : tints[i];
     GLuint sprite = facing < 0 ? cat_west : cat_east;
     if (sprite)
         draw_cat(sprite, (float)x - 7.0f, (float)y - 28.0f, tint);
@@ -653,11 +704,12 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
     {
         glColor3f(tint[0], tint[1], tint[2]);
         draw_rect((float)x, (float)y, PLAYER_W, PLAYER_H);
-        char label[8];
-        snprintf(label, sizeof(label), "P%d", i + 1);
+        const char *label = player_name(state, i);
         glColor3f(0.04f, 0.07f, 0.12f);
-        draw_centered((float)x + 25.0f, (float)y + 20.0f, 1.5f, label);
+        draw_centered((float)x + 25.0f, (float)y + 20.0f, 0.8f, label);
     }
+    glColor3f(tint[0], tint[1], tint[2]);
+    draw_centered(fmaxf(65, fminf(735, (float)x + 25)), (float)y - 48, 1.0f, player_name(state, i));
     if (my_id == i + 1)
     {
         glColor3f(0.68f, 0.91f, 1.0f);
@@ -675,6 +727,49 @@ static const char *phase_name(int phase)
 
 static void draw_button(float x, float y, float w, float h, const char *label, bool hovered);
 static void draw_sound_controls(void);
+
+static float playfield_panel_top(float height)
+{
+    return HUD_H + (ARENA_H - HUD_H - height) * 0.5f;
+}
+
+static float results_panel_top(const GameState *state)
+{
+    int players = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i) players += state->player_active[i] != 0;
+    return playfield_panel_top(255.0f + 30.0f * players);
+}
+
+static float ready_button_y(const GameState *state)
+{
+    return state->phase == 3 ? ARENA_H + HUD_H - results_panel_top(state) - 90.0f :
+        playfield_panel_top(290) + (state->phase == 0 ? 178 : 150);
+}
+
+static void draw_ready_button(const GameState *state, int player_id, float y, const char *label)
+{
+    int total = 0, ready = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+        if (state->player_active[i]) {
+            ++total;
+            if (state->ready_players & (1 << i)) ++ready;
+        }
+    bool mine = player_id >= 1 && player_id <= MAX_PLAYERS &&
+                (state->ready_players & (1 << (player_id - 1)));
+    draw_button(264, y, 272, 48, mine ? "READY - WAITING FOR OTHERS" : label, mine);
+    if (mine) {
+        glColor3f(0.28f, 0.95f, 0.48f);
+        glLineWidth(3);
+        glBegin(GL_LINES);
+        glVertex2f(278, y + 23); glVertex2f(283, y + 29);
+        glVertex2f(283, y + 29); glVertex2f(292, y + 16);
+        glEnd(); glLineWidth(1);
+    }
+    char count[48];
+    snprintf(count, sizeof(count), "%d/%d READY", ready, total);
+    glColor3f(mine ? 0.28f : 0.67f, mine ? 0.95f : 0.77f, mine ? 0.48f : 0.89f);
+    draw_centered(400, y + 60, 1.25f, count);
+}
 
 static void draw_arena(const GameState *state, bool has_state, int player_id,
                        uint32_t room_code, const int facing[MAX_PLAYERS],
@@ -708,15 +803,16 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
         active_count += state->player_active[i] ? 1 : 0;
     char text[96];
     char level_label[24];
-    snprintf(level_label, sizeof(level_label), "LEVEL %d", state->level > 0 ? state->level : 1);
+    if (state->level == 4) snprintf(level_label, sizeof(level_label), "BONUS");
+    else snprintf(level_label, sizeof(level_label), "LEVEL %d", state->level > 0 ? state->level : 1);
     glColor3f(0.58f, 0.83f, 1.0f); draw_centered(215, 20, 1.35f, level_label);
     glColor3f(0.88f, 0.93f, 1.0f); draw_centered(330, 20, 1.6f, phase_name(state->phase));
     glColor3f(1.0f, 0.83f, 0.42f);
     snprintf(text, sizeof(text), "TIME  %02d", state->time_left); draw_centered(525, 20, 1.8f, text);
     glColor3f(0.73f, 0.81f, 0.91f);
-    int shown_capacity = state->phase == 0 ? 2 : MAX_PLAYERS;
+    int shown_capacity = MAX_PLAYERS;
     snprintf(text, sizeof(text), "PLAYERS  %d/%d", active_count, shown_capacity);
-    draw_centered(710, 22, 1.2f, text);
+    draw_centered(714, text_y_at_center(text, 1.1f, 20), 1.1f, text);
     draw_sound_controls();
 
     if (state->phase == 1 && g_viewport.height > 0)
@@ -737,71 +833,124 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     for (int i = 0; i < MAX_PLAYERS; ++i)
     {
         draw_player(state, i, player_id, facing[i], cat_east, cat_west);
-        if (state->player_active[i] && state->phase == 1 && state->level >= 2)
-            draw_lives(state, i);
+
     }
     if (state->phase == 1)
         draw_coin_collect_fx(now);
+    if (state->phase == 1 && state->level == 3 && state->danger_lane >= 0) {
+        glColor3f(0.95f, 0.15f, 0.12f);
+        draw_rect((float)state->danger_lane * 200, 590, 200, 10);
+        draw_centered(400, 100, 1.2f, "DANGER: MOVE OFF THE RED FLOOR!");
+    }
+    if (state->phase == 1 && state->level == 4) {
+        glColor3f(1, 0.83f, 0.42f);
+        draw_centered(400, 100, 1.2f, "TIE BREAK: 15 SECOND COIN RUSH");
+        snprintf(text, sizeof(text), "YOUR BONUS: %d%s", state->bonus_score[player_id > 0 ? player_id - 1 : 0],
+                 player_id > 0 && (state->contenders & (1 << (player_id - 1))) ? "" : "  SPECTATING");
+        draw_centered(400, 125, 1.2f, text);
+    }
+
 
     if (state->phase == 0)
     {
-        glColor3f(0.05f, 0.08f, 0.13f); draw_rect(170, 122, 460, 188);
-        glColor3f(0.16f, 0.24f, 0.34f); draw_rect(170, 122, 460, 3);
-        glColor3f(0.92f, 0.96f, 1); draw_centered(ARENA_W * 0.5f, 151, 2.1f, "ROOM LOBBY");
+        float top = playfield_panel_top(290);
+        glColor3f(0.05f, 0.08f, 0.13f); draw_rect(170, top, 460, 290);
+        glColor3f(0.16f, 0.24f, 0.34f); draw_rect(170, top, 460, 3);
+        glColor3f(0.92f, 0.96f, 1); draw_centered(ARENA_W * 0.5f, top + 29, 2.1f, "ROOM LOBBY");
         glColor3f(0.67f, 0.77f, 0.89f);
-        snprintf(text, sizeof(text), "%d / 2 PLAYERS - WAITING TO START", active_count);
-        draw_centered(ARENA_W * 0.5f, 194, 1.25f, text);
+        snprintf(text, sizeof(text), "%d PLAYERS - AT LEAST 2 NEEDED", active_count);
+        draw_centered(ARENA_W * 0.5f, top + 72, 1.25f, text);
         glColor3f(1, 0.83f, 0.42f);
-        snprintf(text, sizeof(text), "ROOM CODE  %06u", room_code); draw_centered(ARENA_W * 0.5f, 233, 1.65f, text);
+        snprintf(text, sizeof(text), "ROOM CODE  %06u", room_code); draw_centered(ARENA_W * 0.5f, top + 111, 1.65f, text);
         glColor3f(0.57f, 0.68f, 0.81f);
-        draw_centered(ARENA_W * 0.5f, 274, 1.05f, "Share this code with friends to fill the room");
+        draw_centered(ARENA_W * 0.5f, top + 152, 1.05f, "Share this code, then everyone presses READY");
+        draw_ready_button(state, player_id, ready_button_y(state), "READY TO START");
     }
     else if (state->phase == 2)
     {
-        glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, 150, 500, 290);
-        glColor3f(0.27f, 0.80f, 0.86f); draw_rect(150, 150, 500, 3);
+        float top = playfield_panel_top(290);
+        glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, top, 500, 290);
+        glColor3f(0.27f, 0.80f, 0.86f); draw_rect(150, top, 500, 3);
         glColor3f(0.43f, 0.88f, 0.92f);
-        draw_centered(ARENA_W * 0.5f, 188, 2.2f, "LEVEL 1 COMPLETE");
+        snprintf(text, sizeof(text), "LEVEL %d COMPLETE", state->level);
+        draw_centered(ARENA_W * 0.5f, top + 38, 2.2f, text);
         glColor3f(0.88f, 0.93f, 1.0f);
-        draw_centered(ARENA_W * 0.5f, 230, 1.25f, "Your score carries into the next level");
+        draw_centered(ARENA_W * 0.5f, top + 80, 1.25f, "Your score carries into the next level");
         glColor3f(1.0f, 0.83f, 0.42f);
-        draw_centered(ARENA_W * 0.5f, 264, 1.2f, "Level 2 adds bombs, faster coins and 3 lives");
-        draw_button(264, 300, 272, 58, "CONTINUE TO LEVEL 2", false);
+        draw_centered(ARENA_W * 0.5f, top + 114, 1.2f, state->level == 1 ? "Bombs cost 3 points. Everyone keeps playing!" : "Watch the red floor: bomb bursts are coming!");
+        snprintf(text, sizeof(text), "CONTINUE TO LEVEL %d", state->level + 1);
+        draw_ready_button(state, player_id, ready_button_y(state), text);
         glColor3f(0.57f, 0.68f, 0.81f);
-        draw_centered(ARENA_W * 0.5f, 380, 1.05f, "Press ENTER or click to continue");
+        draw_centered(ARENA_W * 0.5f, top + 230, 1.05f, "Everyone must press ENTER or click to continue");
     }
     else if (state->phase == 3)
     {
-        glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, 160, 500, 232);
-        glColor3f(0.99f, 0.73f, 0.27f); draw_rect(150, 160, 500, 3);
-        glColor3f(0.99f, 0.83f, 0.39f); draw_centered(ARENA_W * 0.5f, 193, 2.2f, "ROUND COMPLETE");
+        float top = results_panel_top(state);
+        glColor3f(0.04f, 0.07f, 0.12f); draw_rect(150, top, 500, ARENA_H + HUD_H - 2 * top);
+        glColor3f(0.99f, 0.73f, 0.27f); draw_rect(150, top, 500, 3);
+        glColor3f(0.99f, 0.83f, 0.39f); draw_centered(ARENA_W * 0.5f, top + 24, 2.2f, "ROUND COMPLETE");
         char winners[96] = ""; size_t used = 0;
         for (int i = 0; i < MAX_PLAYERS; ++i)
             if ((state->winners & (1 << i)) != 0)
             {
                 int n = snprintf(winners + used, sizeof(winners) - used,
-                                 "%sP%d", used ? " & " : "", i + 1);
+                                 "%s%s", used ? " & " : "", player_name(state, i));
                 if (n > 0 && (size_t)n < sizeof(winners) - used) used += (size_t)n;
             }
         if (!used) snprintf(winners, sizeof(winners), "No winner");
-        glColor3f(0.91f, 0.95f, 1); draw_centered(ARENA_W * 0.5f, 225, 1.4f, "WINNER");
-        draw_centered(ARENA_W * 0.5f, 252, 1.8f, winners);
+        glColor3f(0.91f, 0.95f, 1); draw_centered(ARENA_W * 0.5f, top + 60, 1.4f, "WINNER");
+        draw_centered(ARENA_W * 0.5f, top + 87, 1.8f, winners);
         glColor3f(0.67f, 0.77f, 0.89f);
         snprintf(text, sizeof(text), "TOP SCORE  %d PTS", state->best_score);
-        draw_centered(ARENA_W * 0.5f, 283, 1.4f, text);
+        draw_centered(ARENA_W * 0.5f, top + 118, 1.4f, text);
         glColor3f(0.45f, 0.58f, 0.73f);
-        snprintf(text, sizeof(text), "NEXT ROUND IN %d", state->time_left);
-        draw_centered(ARENA_W * 0.5f, 335, 1.15f, text);
+        draw_ready_button(state, player_id, ready_button_y(state), "CONTINUE TO NEXT ROUND");
+        glColor3f(0.67f, 0.77f, 0.89f);
+        float name_width = 0, score_width = 0;
+        for (int i = 0; i < MAX_PLAYERS; ++i) {
+            if (!state->player_active[i]) continue;
+            name_width = fmaxf(name_width, stb_easy_font_width((char *)player_name(state, i)) * 1.3f);
+            snprintf(text, sizeof(text), "%d PTS", state->player_score[i]);
+            score_width = fmaxf(score_width, stb_easy_font_width(text) * 1.3f);
+        }
+        float rank_width = stb_easy_font_width("5.") * 1.3f;
+        float table_width = rank_width + 12 + name_width + 64 + score_width;
+        float rank_x = (ARENA_W - table_width) * 0.5f;
+        float name_x = rank_x + rank_width + 12;
+        float score_right = name_x + name_width + 64 + score_width;
+        int row = 0;
+        for (int order = 0; order < MAX_PLAYERS; ++order)
+            for (int i = 0; i < MAX_PLAYERS; ++i) {
+                if (!state->player_active[i]) continue;
+                int ahead = 0, rank = 1;
+                for (int j = 0; j < MAX_PLAYERS; ++j) {
+                    if (!state->player_active[j]) continue;
+                    bool greater = state->player_score[j] > state->player_score[i] ||
+                        (state->player_score[j] == state->player_score[i] && state->level == 4 &&
+                         state->bonus_score[j] > state->bonus_score[i]);
+                    if (greater) ++rank;
+                    if (greater || (state->player_score[j] == state->player_score[i] &&
+                        (state->level != 4 || state->bonus_score[j] == state->bonus_score[i]) && j < i)) ++ahead;
+                }
+                if (ahead != order) continue;
+                float row_y = top + 155 + row++ * 30;
+                snprintf(text, sizeof(text), "%d.", rank);
+                draw_text(rank_x, row_y, 1.3f, text);
+                draw_text(name_x, row_y, 1.3f, player_name(state, i));
+                snprintf(text, sizeof(text), "%d PTS", state->player_score[i]);
+                draw_text(score_right - stb_easy_font_width(text) * 1.3f, row_y, 1.3f, text);
+                if (state->winners & (1 << i)) draw_text(score_right + 18, row_y, 1.3f, "WINNER");
+            }
     }
 
     for (int i = 0; i < MAX_PLAYERS; ++i)
         if (state->player_active[i])
         {
-            snprintf(text, sizeof(text), "P%d  %d pts%s", i + 1, state->player_score[i],
+            snprintf(text, sizeof(text), "%s  %d pts%s", player_name(state, i), state->player_score[i],
                      player_id == i + 1 ? "  YOU" : "");
             glColor3f(player_id == i + 1 ? 0.61f : 0.75f,
                       player_id == i + 1 ? 0.89f : 0.82f, 0.97f);
-            draw_centered(((float)i + 0.5f) * ARENA_W / MAX_PLAYERS, (float)ARENA_H - 22.0f, 1.15f, text);
+            draw_centered(((float)i + 0.5f) * ARENA_W / MAX_PLAYERS, (float)ARENA_H - 22.0f, 0.85f, text);
         }
 }
 
@@ -818,21 +967,84 @@ static void draw_button(float x, float y, float w, float h, const char *label, b
     draw_rect(x, y, w, 2.0f);
     glColor3f(0.91f, 0.96f, 1.0f);
     // Match both axes to the actual font dimensions, including scaled labels
-    float text_height = stb_easy_font_height((char *)label) * 1.15f;
-    draw_centered(x + w * 0.5f, y + (h - text_height) * 0.5f, 1.15f, label);
+    struct { float x, y, z; unsigned char color[4]; } vertices[4096];
+    int quads = stb_easy_font_print(0, 0, (char *)label, NULL, vertices, sizeof(vertices));
+    if (quads <= 0) return;
+    float top = vertices[0].y, bottom = top;
+    for (int i = 1; i < quads * 4; ++i) {
+        if (vertices[i].y < top) top = vertices[i].y;
+        if (vertices[i].y > bottom) bottom = vertices[i].y;
+    }
+    draw_centered(x + w * 0.5f, y + h * 0.5f - (top + bottom) * 1.15f * 0.5f, 1.15f, label);
+}
+
+static bool handle_sound_click(double x, double y)
+{
+    if (point_in_rect(x, y, 640, SOUND_CONTROL_Y, 32, 28)) {
+        if (g_music_muted || g_music_volume == 0) {
+            g_music_muted = false;
+            if (g_music_volume == 0) g_music_volume = MIX_MAX_VOLUME * 3 / 5;
+        } else g_music_muted = true;
+    } else if (point_in_rect(x, y, 684, SOUND_CONTROL_Y, 22, 28)) {
+        g_music_volume = g_music_volume > 16 ? g_music_volume - 16 : 0;
+        g_music_muted = false;
+    } else if (point_in_rect(x, y, 766, SOUND_CONTROL_Y, 22, 28)) {
+        g_music_volume = g_music_volume < MIX_MAX_VOLUME - 16 ? g_music_volume + 16 : MIX_MAX_VOLUME;
+        g_music_muted = false;
+    } else if (point_in_rect(x, y, 712, SOUND_CONTROL_Y, 45, 28)) {
+        g_music_volume = (int)((x - 712 + 1) * MIX_MAX_VOLUME / 45);
+        if (g_music_volume > MIX_MAX_VOLUME) g_music_volume = MIX_MAX_VOLUME;
+        g_music_muted = false;
+    } else return false;
+    apply_music_volume();
+    if (g_audio_ready && g_audio_focused && !g_music_muted && g_music_volume > 0 && g_tick_sound)
+        Mix_PlayChannel(0, g_tick_sound, 0);
+    else if (g_audio_ready) Mix_HaltChannel(0);
+    return true;
 }
 
 static void draw_sound_controls(void)
 {
-    draw_button(640, 45, 40, 24, g_music_muted ? "OFF" : "SND", false);
-    draw_button(684, 45, 22, 24, "-", false);
-    for (int segment = 0; segment < 5; ++segment)
-    {
-        bool on = !g_music_muted && g_music_volume >= (segment + 1) * MIX_MAX_VOLUME / 5;
-        glColor3f(on ? 0.30f : 0.12f, on ? 0.82f : 0.20f, on ? 0.82f : 0.30f);
-        draw_rect(712.0f + (float)segment * 9.0f, 53, 7, 9);
+    bool muted = g_music_muted || g_music_volume == 0;
+    draw_button(640, SOUND_CONTROL_Y, 32, 28, "", false);
+    glPushMatrix();
+    glTranslatef(muted ? -4.375f : -1.875f, -0.5f, 0);
+    glColor3f(0.91f, 0.96f, 1.0f);
+    draw_rect(647, SOUND_CONTROL_Y + 11, 5, 7);
+    glBegin(GL_QUADS);
+    glVertex2f(652,SOUND_CONTROL_Y+11); glVertex2f(658,SOUND_CONTROL_Y+7);
+    glVertex2f(658,SOUND_CONTROL_Y+22); glVertex2f(652,SOUND_CONTROL_Y+18);
+    glEnd();
+    glLineWidth(1.5f);
+    if (muted) {
+        glBegin(GL_LINES);
+        glVertex2f(665,SOUND_CONTROL_Y+10); glVertex2f(673,SOUND_CONTROL_Y+19);
+        glVertex2f(673,SOUND_CONTROL_Y+10); glVertex2f(665,SOUND_CONTROL_Y+19);
+        glEnd();
+    } else {
+        // Same curved stroke, translated five pixels: both horizontal gaps are five pixels at the center.
+        for (int copy = 0; copy < 2; ++copy) {
+            glBegin(GL_QUAD_STRIP);
+            for (int step = 0; step <= 24; ++step) {
+                float angle = (-60.0f + step * 5.0f) * 0.01745329252f;
+                for (int edge = 0; edge < 2; ++edge) {
+                    float radius = edge ? 6.625f : 5.375f;
+                    glVertex2f(657 + copy * 5 + cosf(angle) * radius,
+                                SOUND_CONTROL_Y + 14.5f + sinf(angle) * radius);
+                }
+            }
+            glEnd();
+        }
     }
-    draw_button(766, 45, 22, 24, "+", false);
+    glLineWidth(1);
+    glPopMatrix();
+    draw_button(684, SOUND_CONTROL_Y, 22, 28, "-", false);
+    for (int segment = 0; segment < 5; ++segment) {
+        bool on = !muted && g_music_volume > segment * MIX_MAX_VOLUME / 5;
+        glColor3f(on ? 0.30f : 0.12f, on ? 0.82f : 0.20f, on ? 0.82f : 0.30f);
+        draw_rect(712.0f + segment * 9.0f, SOUND_CONTROL_Y + 10, 7, 9);
+    }
+    draw_button(766, SOUND_CONTROL_Y, 22, 28, "+", false);
 }
 
 static void draw_menu_background(void)
@@ -846,22 +1058,63 @@ static void draw_menu_background(void)
     glEnd();
 }
 
+/* Hallmark component: name field; native pixel-game theme, no CSS runtime. */
+static const struct {
+    float surface[3], border[3], hover[3], focus[3], text[3], muted[3], error[3];
+} name_field_theme = {
+    {0.035f, 0.060f, 0.095f}, {0.35f, 0.44f, 0.55f}, {0.50f, 0.66f, 0.72f},
+    {0.43f, 0.88f, 0.92f}, {0.91f, 0.96f, 1.0f}, {0.57f, 0.68f, 0.79f},
+    {1.0f, 0.48f, 0.52f}
+};
+
+static void draw_name_field(double mx, double my)
+{
+    const float x = 290, y = menu_origin_y() + 90, w = 220, h = 40;
+    bool hovered = point_in_rect(mx, my, x, y, w, h);
+    bool invalid = strncmp(g_ui_error, "Enter your name", 15) == 0;
+    const float *border = invalid ? name_field_theme.error :
+        g_name_focused ? name_field_theme.focus : hovered ? name_field_theme.hover : name_field_theme.border;
+    glColor3fv(name_field_theme.text); draw_text(x, text_y_at_center("Player name", 1.15f, y - 14), 1.15f, "Player name");
+    char count[12]; snprintf(count, sizeof(count), "%zu/16", strlen(g_display_name));
+    glColor3fv(name_field_theme.muted);
+    draw_text(x + w - stb_easy_font_width(count), text_y_at_center(count, 1.0f, y - 14), 1.0f, count);
+    glColor3fv(border); draw_rect(x, y, w, h);
+    glColor3fv(name_field_theme.surface); draw_rect(x + 2, y + 2, w - 4, h - 4);
+    glColor3fv(g_display_name[0] ? name_field_theme.text : name_field_theme.muted);
+    const char *value = g_display_name[0] ? g_display_name : "Your nickname";
+    if (g_name_focused && g_name_selected && g_display_name[0]) {
+        float width = stb_easy_font_width(g_display_name) * 1.25f;
+        glColor3fv(name_field_theme.focus); draw_rect(400 - width * 0.5f - 2, y + 10, width + 4, 20);
+        glColor3fv(name_field_theme.surface);
+    }
+    draw_centered(400, text_y_at_center(value, 1.25f, y + h * 0.5f), 1.25f, value);
+    if (g_name_focused && !g_name_selected) {
+        float half_width = stb_easy_font_width((char *)value) * 1.25f * 0.5f;
+        float caret_x = g_display_name[0] ? 400 + half_width + 2 : 400 - half_width - 3;
+        glColor3fv(name_field_theme.focus); draw_rect(caret_x, y + (h - 17) * 0.5f, 2, 17);
+    }
+    glColor3fv(invalid ? name_field_theme.error : name_field_theme.muted);
+    const char *help = invalid ? "Enter a name to create or join a room." : "Shown to everyone in your room.";
+    draw_centered(400, text_y_at_center(help, 0.95f, menu_origin_y() + 145), 0.95f, help);
+}
+
 static void draw_main_menu(double mx, double my)
 {
     draw_menu_background();
+    float origin = menu_origin_y();
     double now = glfwGetTime();
     for (int i = 0; i < MENU_CAT_COUNT; ++i)
         update_and_draw_menu_cat(&g_menu_cats[i], now);
-    glColor3f(0.43f, 0.88f, 0.92f); draw_centered(ARENA_W * 0.5f, 105, 3.2f, "COIN RUSH");
-    glColor3f(0.68f, 0.77f, 0.88f); draw_centered(ARENA_W * 0.5f, 158, 1.25f, "CATCH COINS. CHASE THE HIGH SCORE.");
-    glColor3f(0.04f, 0.065f, 0.11f); draw_rect(220, 208, 360, 340);
-    draw_button(278, 244, 244, 56, "PLAY - CREATE ROOM", point_in_rect(mx, my, 278, 244, 244, 56));
-    draw_button(278, 318, 244, 56, "JOIN A ROOM", point_in_rect(mx, my, 278, 318, 244, 56));
-    draw_button(278, 392, 244, 56, "EXIT GAME", point_in_rect(mx, my, 278, 392, 244, 56));
+    glColor3f(0.43f, 0.88f, 0.92f); draw_centered(ARENA_W * 0.5f, text_y_at_center("COIN RUSH", 3.2f, origin), 3.2f, "COIN RUSH");
+    glColor3f(0.68f, 0.77f, 0.88f); draw_centered(ARENA_W * 0.5f, text_y_at_center("CATCH COINS. CHASE THE HIGH SCORE.", 1.25f, origin + 38), 1.25f, "CATCH COINS. CHASE THE HIGH SCORE.");
+    draw_name_field(mx, my);
+    draw_button(250, origin + 168, 300, 48, "PLAY - CREATE ROOM", point_in_rect(mx, my, 250, origin + 168, 300, 48));
+    draw_button(250, origin + 228, 300, 48, "JOIN A ROOM", point_in_rect(mx, my, 250, origin + 228, 300, 48));
+    draw_button(250, origin + 288, 300, 40, "EXIT GAME", point_in_rect(mx, my, 250, origin + 288, 300, 40));
     glColor3f(0.54f, 0.65f, 0.78f);
-    draw_centered(ARENA_W * 0.5f, 480, 1.0f, "UP TO FIVE PLAYERS  |  LEFT / RIGHT TO MOVE");
-    if (g_ui_error[0])
-    { glColor3f(1.0f, 0.48f, 0.52f); draw_centered(ARENA_W * 0.5f, 505, 1.05f, g_ui_error); }
+    draw_centered(ARENA_W * 0.5f, text_y_at_center("UP TO FIVE PLAYERS  |  LEFT / RIGHT TO MOVE", 1.0f, origin + 350), 1.0f, "UP TO FIVE PLAYERS  |  LEFT / RIGHT TO MOVE");
+    if (g_ui_error[0] && strncmp(g_ui_error, "Enter your name", 15) != 0)
+    { glColor3f(1.0f, 0.48f, 0.52f); draw_centered(ARENA_W * 0.5f, origin + 373, 1.05f, g_ui_error); }
 }
 
 static void draw_exit_confirm(double mx, double my)
@@ -880,17 +1133,22 @@ static void draw_exit_confirm(double mx, double my)
 static void draw_join_code_screen(double mx, double my)
 {
     draw_menu_background();
-    glColor3f(0.43f, 0.88f, 0.92f); draw_centered(ARENA_W * 0.5f, 105, 2.6f, "JOIN A ROOM");
-    glColor3f(0.04f, 0.065f, 0.11f); draw_rect(190, 190, 420, 280);
-    glColor3f(0.68f, 0.77f, 0.88f); draw_centered(ARENA_W * 0.5f, 232, 1.3f, "ENTER THE SIX-DIGIT ROOM CODE");
-    glColor3f(0.02f, 0.035f, 0.065f); draw_rect(264, 276, 272, 58);
+    const float top = (ARENA_H - 292) * 0.5f;
+    glColor3f(0.04f, 0.065f, 0.11f); draw_rect(190, top, 420, 292);
+    glColor3f(0.43f, 0.88f, 0.92f); draw_centered(400, text_y_at_center("JOIN A ROOM", 2.6f, top + 28), 2.6f, "JOIN A ROOM");
+    glColor3f(0.68f, 0.77f, 0.88f); draw_centered(400, text_y_at_center("ENTER THE SIX-DIGIT ROOM CODE", 1.3f, top + 65), 1.3f, "ENTER THE SIX-DIGIT ROOM CODE");
+    glColor3f(0.02f, 0.035f, 0.065f); draw_rect(264, top + 90, 272, 52);
     char display[7] = "______";
     for (size_t i = 0; i < g_room_code_length; ++i) display[i] = g_room_code_input[i];
-    glColor3f(1.0f, 0.83f, 0.42f); draw_centered(ARENA_W * 0.5f, 296, 2.0f, display);
-    draw_button(264, 357, 272, 54, "JOIN ROOM", point_in_rect(mx, my, 264, 357, 272, 54));
-    draw_button(264, 424, 272, 48, "BACK", point_in_rect(mx, my, 264, 424, 272, 48));
-    if (g_ui_error[0])
-    { glColor3f(1.0f, 0.48f, 0.52f); draw_centered(ARENA_W * 0.5f, 500, 1.0f, g_ui_error); }
+    if (g_code_selected) {
+        glColor3f(0.25f, 0.40f, 0.50f); draw_rect(350, top + 103, 100, 25);
+    }
+    glColor3f(1.0f, 0.83f, 0.42f); draw_centered(400, text_y_at_center(display, 2.0f, top + 116), 2.0f, display);
+    draw_button(264, top + 162, 272, 48, "JOIN ROOM", point_in_rect(mx, my, 264, top + 162, 272, 48));
+    draw_button(264, top + 224, 272, 44, "BACK", point_in_rect(mx, my, 264, top + 224, 272, 44));
+    if (g_ui_error[0]) {
+        glColor3f(1.0f, 0.48f, 0.52f); draw_centered(400, top + 309, 1.0f, g_ui_error);
+    }
 }
 
 static void draw_connecting(uint32_t room_code, bool create_room)
@@ -912,8 +1170,15 @@ static void draw_connecting(uint32_t room_code, bool create_room)
 
 static void start_room_request(uint32_t room_code, bool create_room)
 {
+    bool has_letter = false;
+    for (size_t i = 0; g_display_name[i]; ++i) has_letter |= g_display_name[i] != ' ';
+    if (!has_letter) {
+        snprintf(g_ui_error, sizeof(g_ui_error), "Enter your name before creating or joining a room.");
+        g_screen = UI_MAIN_MENU; g_name_focused = true; return;
+    }
     memset(g_pickup_effects, 0, sizeof(g_pickup_effects));
     pthread_mutex_lock(&g_mutex);
+    snprintf(g_client.display_name, sizeof(g_client.display_name), "%s", g_display_name);
     g_client.room_code = room_code;
     g_client.create_room = create_room;
     g_client.client_token = dds_time();
@@ -938,17 +1203,36 @@ static void submit_room_code(void)
 static void character_callback(GLFWwindow *window, unsigned int codepoint)
 {
     (void)window;
-    if (g_screen != UI_JOIN_CODE || codepoint < '0' || codepoint > '9' || g_room_code_length >= 6)
+    if (g_screen == UI_MAIN_MENU && g_name_focused) {
+        if ((codepoint >= 'a' && codepoint <= 'z') || (codepoint >= 'A' && codepoint <= 'Z') ||
+            (codepoint >= '0' && codepoint <= '9') || codepoint == ' ' || codepoint == '_' || codepoint == '-') {
+            if (g_name_selected) { g_display_name[0] = 0; g_name_selected = false; }
+            size_t n = strlen(g_display_name);
+            if (n < 16) { g_display_name[n] = (char)codepoint; g_display_name[n + 1] = 0; g_ui_error[0] = 0; }
+        }
         return;
+    }
+    if (g_screen != UI_JOIN_CODE || codepoint < '0' || codepoint > '9') return;
+    if (g_code_selected) { g_room_code_length = 0; g_code_selected = false; g_code_selected = false; }
+    if (g_room_code_length >= 6) return;
     g_room_code_input[g_room_code_length++] = (char)codepoint;
-    g_room_code_input[g_room_code_length] = '\0';
-    g_ui_error[0] = '\0';
+    g_room_code_input[g_room_code_length] = 0; g_ui_error[0] = 0;
+}
+
+static void mouse_button_callback(GLFWwindow *window, int button, int action, int mods)
+{
+    (void)mods;
+    if (button != GLFW_MOUSE_BUTTON_LEFT || action != GLFW_PRESS) return;
+    double x, y; glfwGetCursorPos(window, &x, &y);
+    window_to_scene(x, y, &g_click_x, &g_click_y);
+    g_mouse_clicked = true;
 }
 
 static void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
-    (void)window; (void)scancode; (void)mods;
-    if (action != GLFW_PRESS) return;
+    (void)window; (void)scancode;
+    if (action != GLFW_PRESS && !(action == GLFW_REPEAT &&
+        (key == GLFW_KEY_BACKSPACE || key == GLFW_KEY_DELETE))) return;
     if (key == GLFW_KEY_F11)
     { toggle_fullscreen(window); return; }
     if (key == GLFW_KEY_ESCAPE && g_screen == UI_GAME)
@@ -969,12 +1253,25 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action, 
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         return;
     }
+    if (g_screen == UI_MAIN_MENU && g_name_focused) {
+        size_t n = strlen(g_display_name);
+        if ((mods & GLFW_MOD_CONTROL) && key == GLFW_KEY_A) { g_name_selected = n > 0; return; }
+        if ((key == GLFW_KEY_BACKSPACE || key == GLFW_KEY_DELETE) && g_name_selected) {
+            g_display_name[0] = 0; g_name_selected = false; g_ui_error[0] = 0;
+        } else if (key == GLFW_KEY_BACKSPACE && n) { g_display_name[n - 1] = 0; g_ui_error[0] = 0; }
+        if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) g_name_focused = false;
+        return;
+    }
     if (g_screen != UI_JOIN_CODE) return;
+    if ((mods & GLFW_MOD_CONTROL) && key == GLFW_KEY_A) { g_code_selected = g_room_code_length > 0; return; }
+    if ((key == GLFW_KEY_BACKSPACE || key == GLFW_KEY_DELETE) && g_code_selected) {
+        g_room_code_input[0] = 0; g_room_code_length = 0; g_code_selected = false; g_code_selected = false; return;
+    }
     if (key == GLFW_KEY_BACKSPACE && g_room_code_length)
     { g_room_code_input[--g_room_code_length] = '\0'; g_ui_error[0] = '\0'; }
     else if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) submit_room_code();
     else if (key == GLFW_KEY_ESCAPE)
-    { g_room_code_length = 0; g_room_code_input[0] = '\0'; g_ui_error[0] = '\0'; g_screen = UI_MAIN_MENU; }
+    { g_room_code_length = 0; g_code_selected = false; g_room_code_input[0] = '\0'; g_ui_error[0] = '\0'; g_screen = UI_MAIN_MENU; }
 }
 
 static void *dds_worker(void *credentials)
@@ -1000,11 +1297,14 @@ static void *dds_worker(void *credentials)
         char direction = g_client.direction;
         uint32_t room_code = g_client.room_code;
         uint64_t token = g_client.client_token;
+        char display_name[17];
+        memcpy(display_name, g_client.display_name, sizeof(display_name));
         pthread_mutex_unlock(&g_mutex);
         if (!running) break;
 
         if (join_requested && token != active_token)
         {
+            memcpy(net.display_name, display_name, sizeof(net.display_name));
             net_client_room(&net, (int32_t)room_code, create_room, token);
             active_token = token;
         }
@@ -1020,7 +1320,7 @@ static void *dds_worker(void *credentials)
         int previous_player_id = net.player_id;
         bool updated = net_client_state(&net, &incoming);
         if (previous_player_id <= 0 && net.player_id > 0)
-            printf("Joined room %06u as player %d\n", room_code, net.player_id);
+            printf("Joined room %06u as %s\n", room_code, display_name[0] ? display_name : "Unnamed player");
         if (!net_client_send(&net, continue_requested ? 'c' : direction))
         {
             pthread_mutex_lock(&g_mutex);
@@ -1038,7 +1338,8 @@ static void *dds_worker(void *credentials)
         }
         if (updated)
         {
-            if (incoming.phase != 0 && incoming.phase != 2 && incoming.phase != 3)
+            if ((incoming.phase != 0 && incoming.phase != 2 && incoming.phase != 3) ||
+                (net.player_id > 0 && (incoming.ready_players & (1 << (net.player_id - 1)))))
                 g_client.continue_requested = false;
             if (g_client.has_state)
                 for (int p = 0; p < MAX_PLAYERS; ++p)
@@ -1202,6 +1503,8 @@ int main(int argc, char **argv)
     g_heart_texture = load_rgba_texture(HEART_SHEET_PATH, HEART_SHEET_WIDTH, HEART_SHEET_HEIGHT);
     initialize_menu_cats(glfwGetTime());
     initialize_audio();
+    glfwSetWindowFocusCallback(window, audio_focus_callback);
+    audio_focus_callback(window, glfwGetWindowAttrib(window, GLFW_FOCUSED));
 
     pthread_mutex_lock(&g_mutex); g_client.running = true; g_client.direction = 'n'; pthread_mutex_unlock(&g_mutex);
     pthread_t worker;
@@ -1209,45 +1512,38 @@ int main(int argc, char **argv)
     { fprintf(stderr, "Could not start the DDS worker.\n"); glfwDestroyWindow(window); glfwTerminate(); return 1; }
     glfwSetCharCallback(window, character_callback);
     glfwSetKeyCallback(window, key_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
 
-    /* The Windows client launcher sets this after provisioning a signed
-     * client identity. All such clients meet in the server's reserved room. */
-    const char *auto_join = getenv("COINRUSH_AUTO_JOIN");
-    if (auto_join && strcmp(auto_join, "1") == 0)
-    {
-        fprintf(stderr, "Connecting to quick-play room %06d...\n",
-                NET_QUICKPLAY_ROOM_CODE);
-        start_room_request(NET_QUICKPLAY_ROOM_CODE, true);
-    }
-
-    bool previous_mouse_down = false;
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
         double window_mx = 0, window_my = 0, mx = 0, my = 0;
         glfwGetCursorPos(window, &window_mx, &window_my);
         window_to_scene(window_mx, window_my, &mx, &my);
-        bool mouse_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        bool clicked = mouse_down && !previous_mouse_down; previous_mouse_down = mouse_down;
+        bool clicked = g_mouse_clicked; g_mouse_clicked = false;
+        if (clicked) { mx = g_click_x; my = g_click_y; }
 
         if (g_screen == UI_MAIN_MENU && clicked)
         {
-            if (point_in_rect(mx, my, 278, 244, 244, 56))
+            g_name_selected = false;
+            g_name_focused = point_in_rect(mx, my, 290, menu_origin_y() + 90, 220, 40);
+            if (point_in_rect(mx, my, 250, menu_origin_y() + 168, 300, 48))
             {
                 uint32_t room_code = (uint32_t)NET_QUICKPLAY_ROOM_CODE + 1u +
                                      (uint32_t)(rand() % 899999);
                 start_room_request(room_code, true);
             }
-            else if (point_in_rect(mx, my, 278, 318, 244, 56))
-            { g_screen = UI_JOIN_CODE; g_room_code_length = 0; g_room_code_input[0] = '\0'; g_ui_error[0] = '\0'; }
-            else if (point_in_rect(mx, my, 278, 392, 244, 56))
+            else if (point_in_rect(mx, my, 290, menu_origin_y() + 90, 220, 40)) g_name_focused = true;
+            else if (point_in_rect(mx, my, 250, menu_origin_y() + 228, 300, 48))
+            { g_screen = UI_JOIN_CODE; g_room_code_length = 0; g_code_selected = false; g_room_code_input[0] = '\0'; g_ui_error[0] = '\0'; }
+            else if (point_in_rect(mx, my, 250, menu_origin_y() + 288, 300, 40))
             { g_exit_from_game = false; g_screen = UI_EXIT_CONFIRM; }
         }
         else if (g_screen == UI_JOIN_CODE && clicked)
         {
-            if (point_in_rect(mx, my, 264, 357, 272, 54)) submit_room_code();
-            else if (point_in_rect(mx, my, 264, 424, 272, 48))
-            { g_screen = UI_MAIN_MENU; g_room_code_length = 0; g_room_code_input[0] = '\0'; g_ui_error[0] = '\0'; }
+            if (point_in_rect(mx, my, 264, (ARENA_H - 292) * 0.5f + 162, 272, 48)) submit_room_code();
+            else if (point_in_rect(mx, my, 264, (ARENA_H - 292) * 0.5f + 224, 272, 44))
+            { g_screen = UI_MAIN_MENU; g_room_code_length = 0; g_code_selected = false; g_room_code_input[0] = '\0'; g_ui_error[0] = '\0'; }
         }
         else if (g_screen == UI_EXIT_CONFIRM && clicked)
         {
@@ -1258,26 +1554,13 @@ int main(int argc, char **argv)
         }
         else if (g_screen == UI_GAME && clicked)
         {
-            if (point_in_rect(mx, my, 640, 45, 40, 24))
-            {
-                g_music_muted = !g_music_muted;
-                apply_music_volume();
-            }
-            else if (point_in_rect(mx, my, 684, 45, 22, 24))
-            {
-                g_music_volume = g_music_volume > 16 ? g_music_volume - 16 : 0;
-                apply_music_volume();
-            }
-            else if (point_in_rect(mx, my, 766, 45, 22, 24))
-            {
-                g_music_volume = g_music_volume < MIX_MAX_VOLUME - 16 ?
-                                 g_music_volume + 16 : MIX_MAX_VOLUME;
-                apply_music_volume();
-            }
-            else if (point_in_rect(mx, my, 264, 300, 272, 58))
+            if (handle_sound_click(mx, my)) { /* handled by audio controls */ }
+            else
             {
                 pthread_mutex_lock(&g_mutex);
-                if (g_client.has_state && (g_client.state.phase == 0 || g_client.state.phase == 2 || g_client.state.phase == 3))
+                if (g_client.has_state &&
+                    (g_client.state.phase == 0 || g_client.state.phase == 2 || g_client.state.phase == 3) &&
+                    point_in_rect(mx, my, 264, ready_button_y(&g_client.state), 272, 48))
                     g_client.continue_requested = true;
                 pthread_mutex_unlock(&g_mutex);
             }
@@ -1343,8 +1626,14 @@ int main(int argc, char **argv)
     if (g_audio_ready)
     {
         Mix_HaltMusic();
+        Mix_HaltChannel(-1);
+        if (g_coin_sound) Mix_FreeChunk(g_coin_sound);
+        if (g_bomb_sound) Mix_FreeChunk(g_bomb_sound);
+        if (g_tick_sound) Mix_FreeChunk(g_tick_sound);
         if (g_level_one_music) Mix_FreeMusic(g_level_one_music);
         if (g_level_two_music) Mix_FreeMusic(g_level_two_music);
+        if (g_level_three_music) Mix_FreeMusic(g_level_three_music);
+        if (g_bonus_music) Mix_FreeMusic(g_bonus_music);
         Mix_CloseAudio();
         Mix_Quit();
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
