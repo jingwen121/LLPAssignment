@@ -119,6 +119,7 @@ static void test_server(const char *root)
         state.coin_gold[i] = i == 0;
         state.coin_size[i] = i == 0 ? 14 : 20;
     }
+    for (int i = 0; i < NET_PLAYERS; ++i) state.player_bomb_seq[i] = (uint32_t)(7 + i);
     int64_t last_snapshot = 0;
     atomic_store(&shared->server_ready, 1);
 
@@ -186,7 +187,7 @@ static void test_server(const char *root)
                 case 4: bad.player_y[0] = -1; break;
                 case 5: bad.player_score[0] = -1; break;
                 case 6: bad.phase = -1; break;
-                case 7: bad.phase = 3; break;
+                case 7: bad.phase = 4; break;
                 case 8: bad.time_left = -1; break;
                 case 9: bad.time_left = 61; break;
                 case 10: bad.winners = -1; break;
@@ -198,6 +199,19 @@ static void test_server(const char *root)
                 case 17: bad.coin_size[0] = INT_MAX; break;
                 case 18: bad.best_score = -1; break;
                 case 19: bad.room_code = 345678; break;
+                case 20: bad.level = -1; break;
+                case 21: bad.level = 5; break;
+                case 22: bad.player_lives[0] = -1; break;
+                case 23: bad.player_lives[0] = 4; break;
+                case 24: bad.bomb_x[0] = -1; break;
+                case 25: bad.bomb_x[0] = 801; break;
+                case 26: bad.bomb_y[0] = -701; break;
+                case 27: bad.bomb_y[0] = 621; break;
+                case 28: bad.bomb_active[0] = true; bad.bomb_size[0] = INT_MAX; break;
+                case 29: bad.ready_players = -1; break;
+                case 30: bad.ready_players = 32; break;
+                case 31: memset(bad.player_names[0], 'x', sizeof(bad.player_names[0])); break;
+                case 32: bad.player_names[0][0] = '\n'; break;
             }
 
             // Kind 16 deliberately bypasses net_server_state so the sequence is
@@ -236,8 +250,10 @@ static void test_client(const char *root, int index)
         exit(1);
     }
 
-    if (report->room_code)
+    if (report->room_code) {
+        snprintf(net.display_name, sizeof(net.display_name), "Test Cat %d", index + 1);
         net_client_room(&net, report->room_code, report->create_room, (uint64_t)net_now());
+    }
 
     // Publish the GUID before ready; the parent needs a real second identity
     // when constructing an impersonation attempt from the first client
@@ -271,6 +287,7 @@ static void test_client(const char *root, int index)
                 for (int i = 0; i < NET_PLAYERS; ++i)
                     if (snapshot.player_active[i])
                         CHECK(snapshot.player_score[i] == 3);
+                for (int i = 0; i < NET_PLAYERS; ++i) CHECK(snapshot.player_bomb_seq[i] == (uint32_t)(7 + i));
                 atomic_fetch_add(&report->payload_checks, 1);
             }
         }
@@ -492,7 +509,21 @@ static int test_rooms(const char *root)
     for (int i = 0; i < 3; ++i)
         CHECK(player_id(i) > 0 && atomic_load(&shared->clients[i].updates) > 30);
     CHECK(player_id(0) != player_id(2) && player_id(1) == 1);
+    CHECK(strcmp(states[0].player_names[player_id(0)-1], "Test Cat 1") == 0);
+    CHECK(strcmp(states[0].player_names[player_id(2)-1], "Test Cat 3") == 0);
+    CHECK(strcmp(states[1].player_names[player_id(1)-1], "Test Cat 2") == 0);
+    puts("PASS chosen display names arrive in their own room snapshots");
+    CHECK(states[0].phase == 0 && states[2].phase == 0 && states[1].phase == 0);
+    command(0, SEND_INPUT, player_id(0), 'c');
+    room_snapshots(states, 150);
+    CHECK(states[0].phase == 0 && states[0].ready_players == (1 << (player_id(0) - 1)));
+    command(0, SEND_INPUT, player_id(0), 'c');
+    room_snapshots(states, 150);
+    CHECK(states[0].phase == 0);
+    command(2, SEND_INPUT, player_id(2), 'c');
+    room_snapshots(states, 150);
     CHECK(states[0].phase == 1 && states[2].phase == 1 && states[1].phase == 0);
+    puts("PASS lobby waits for every player; duplicate ready votes cannot start it");
     puts("PASS separate rooms retain independent snapshots and player slots");
 
     int victim = player_id(2) - 1;
@@ -631,6 +662,9 @@ int main(int argc, char **argv)
         int first_x = -1;
         int most_coins = 0;
         int64_t playing_at = 0;
+        int64_t break_at = 0, level_two_at = 0;
+        bool saw_bombs = false, saw_level_three = false;
+        bool continue_level = false;
 
         // Probe mode only needs admission plus 1 valid snapshot; link mode
         // stays active for 8 seconds to observe delivery under impairment
@@ -641,7 +675,7 @@ int main(int argc, char **argv)
         int interval_count = 0;
         // The game check stays for a full round; this exercises the actual
         // server adapter rather than the deterministic protocol fixture
-        int64_t deadline = net_now() + (game_test ? INT64_C(65000000000) :
+        int64_t deadline = net_now() + (game_test ? INT64_C(140000000000) :
             link_test ? INT64_C(8000000000) : INT64_C(5000000000));
         while (net_now() < deadline && (link_test || net.received == 0))
         {
@@ -672,13 +706,31 @@ int main(int argc, char **argv)
                     if (snapshot.phase == 1 && playing_at == 0)
                         playing_at = received;
 
+                    continue_level = snapshot.phase == 0 || snapshot.phase == 2;
+                    if (snapshot.phase == 2 && break_at == 0)
+                    {
+                        break_at = received;
+                        CHECK(received - playing_at >= INT64_C(29000000000));
+                    }
+                    if (snapshot.phase == 1 && snapshot.level == 2)
+                    {
+                        CHECK(break_at != 0);
+                        if (!level_two_at) level_two_at = received;
+                        for (int b = 0; b < NET_BOMBS; ++b) saw_bombs |= snapshot.bomb_active[b];
+                        for (int i = 0; i < NET_PLAYERS; ++i)
+                            CHECK(snapshot.player_lives[i] >= 0 && snapshot.player_lives[i] <= 3);
+                    }
+
+                    if (snapshot.phase == 1 && snapshot.level == 3) saw_level_three = true;
+
                     // Check the transmitted winner against the same snapshot's
                     // scores; the bitmask retains every tied leader
-                    if (snapshot.phase == 2 && !results)
+                    if (snapshot.phase == 3 && !results)
                     {
                         CHECK(playing_at != 0);
-                        CHECK(received - playing_at >= INT64_C(59000000000));
-                        CHECK(received - playing_at <= INT64_C(62000000000));
+                        CHECK(level_two_at != 0 && saw_bombs);
+                        CHECK(received - level_two_at <= INT64_C(110000000000));
+                        CHECK(saw_level_three);
                         int best = -1, winners = 0;
                         for (int i = 0; i < NET_PLAYERS; ++i)
                         {
@@ -692,13 +744,22 @@ int main(int argc, char **argv)
                             else if (snapshot.player_score[i] == best)
                                 winners |= 1 << i;
                         }
-                        CHECK(snapshot.winners == winners);
-                        CHECK(snapshot.best_score == best);
+                        if (snapshot.level != 4) CHECK(snapshot.winners == winners);
+                        else {
+                            int bonus_best = -1, bonus_winners = 0;
+                            for (int i = 0; i < NET_PLAYERS; ++i)
+                                if (snapshot.player_active[i] && (snapshot.contenders & (1 << i))) {
+                                    if (snapshot.bonus_score[i] > bonus_best) { bonus_best = snapshot.bonus_score[i]; bonus_winners = 1 << i; }
+                                    else if (snapshot.bonus_score[i] == bonus_best) bonus_winners |= 1 << i;
+                                }
+                            CHECK(snapshot.winners == bonus_winners);
+                        }
+                        CHECK(snapshot.best_score == (best < 0 ? 0 : best));
                         results = true;
                     }
                 }
             }
-            CHECK(net_client_send(&net, link_test ? 'r' : 'n'));
+            CHECK(net_client_send(&net, game_test && continue_level ? 'c' : link_test ? 'r' : 'n'));
             dds_sleepfor(DDS_MSECS(1));
         }
 
@@ -849,7 +910,7 @@ int main(int argc, char **argv)
 
     // Wait for each rejection before sending the next malformed sample so a
     // depth-1 reader cannot replace it before the client has a chance to inspect it
-    for (int kind = 1; kind <= 19; ++kind)
+    for (int kind = 1; kind <= 32; ++kind)
     {
         before = atomic_load(&shared->clients[0].rejected);
         atomic_store(&shared->bad_snapshot, kind);
@@ -864,7 +925,7 @@ int main(int argc, char **argv)
     int old_updates = atomic_load(&shared->clients[0].updates);
     wait_ms(150);
     CHECK(atomic_load(&shared->clients[0].updates) > old_updates);
-    puts("PASS 15 malformed snapshot cases, repeated snapshot and recovery");
+    puts("PASS 31 malformed snapshot cases, repeated snapshot and recovery");
 
     // Both processes use this host's monotonic clock; measure DDS write to
     // validated server event, excluding snapshots, rendering and parent polling

@@ -37,7 +37,7 @@ static pthread_mutex_t g_rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t now_ms(void)
 {
-    return (uint64_t)(dds_time() / 1000000u);
+    return (uint64_t)(net_now() / INT64_C(1000000));
 }
 
 static int find_room(int32_t code)
@@ -100,14 +100,20 @@ static void fill_game_state(GameState *out, const Room *room)
     out->winners = game->winners;
     out->best_score = game->best_score;
     out->level = game->level;
+    out->ready_players = game->ready_players;
+    out->contenders = game->contenders;
+    out->danger_lane = game->danger_lane;
     for (int i = 0; i < MAX_PLAYERS; ++i)
     {
+        memcpy(out->player_names[i], game->players[i].name, sizeof(out->player_names[i]));
         out->player_active[i] = game->players[i].active;
         out->player_x[i] = game->players[i].x;
         out->player_y[i] = game->players[i].y;
         out->player_score[i] = game->players[i].score;
+        out->bonus_score[i] = game->bonus_score[i];
         out->player_lives[i] = game->players[i].lives;
         out->player_collect_seq[i] = game->players[i].collect_seq;
+        out->player_bomb_seq[i] = game->players[i].bomb_seq;
     }
     for (int i = 0; i < MAX_COINS; ++i)
     {
@@ -225,15 +231,20 @@ static void *dds_worker(void *credentials)
                 if (response.int_player_id == 0)
                 {
                     response.int_player_id = game_add_player(&room->game);
-                    if (response.int_player_id > 0)
+                    if (response.int_player_id > 0) {
                         room->client_tokens[response.int_player_id - 1] = request->client_token;
+                        if (request->display_name[0])
+                            memcpy(room->game.players[response.int_player_id - 1].name,
+                                   request->display_name, sizeof(request->display_name));
+                        printf("%s joined (%d active)\n", room->game.players[response.int_player_id - 1].name, game_num_active(&room->game));
+                    }
                 }
             }
             Network *reply = room_index >= 0 ? &g_rooms[room_index].network : &net;
             pthread_mutex_unlock(&g_rooms_mutex);
 
             if (response.int_player_id > 0)
-                printf("Player %d joined room %06d\n", (int)response.int_player_id,
+                printf("%s joined room %06d\n", request->display_name[0] ? request->display_name : "Unnamed player",
                        (int)response.room_code);
             // Keep token generation and the encrypted reply in the shared helper
             dds_return_t rc = net_server_accept(reply, response.int_player_id) ?

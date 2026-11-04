@@ -1,4 +1,4 @@
-// Regenerate with: idlc -l c messages.idl
+// Regenerate with: cd build && idlc -l c ../protocol/messages.idl
 
 struct JoinRequest
 {
@@ -6,6 +6,7 @@ struct JoinRequest
     unsigned long long client_token;
     long room_code;
     boolean create_room;
+    char display_name[17];
 };
 
 struct JoinResponse
@@ -41,12 +42,18 @@ struct GameState
     long winners;
     long best_score;
     long level;
+    long ready_players;
+    long contenders;
+    long danger_lane;
+    long bonus_score[5];
+    char player_names[5][17];
     boolean player_active[5];
     long player_x[5];
     long player_y[5];
     long player_score[5];
-    long player_lives[5];
+    long player_lives[5]; // Reserved compatibility field; no elimination
     unsigned long player_collect_seq[5];
+    unsigned long player_bomb_seq[5];
     boolean coin_active[8];
     boolean coin_gold[8];
     long coin_x[8];

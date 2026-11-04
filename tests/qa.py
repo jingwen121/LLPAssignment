@@ -26,7 +26,7 @@ FOREIGN = WORK / "foreign"
 LOCAL_DDS = """<CycloneDDS><Domain Id="42"><General><Interfaces>
 <NetworkInterface name="lo" multicast="false"/></Interfaces>
 <AllowMulticast>false</AllowMulticast></General><Discovery>
-<ParticipantIndex>auto</ParticipantIndex><Peers><Peer Address="127.0.0.1"/></Peers>
+<ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>63</MaxAutoParticipantIndex><Peers><Peer Address="127.0.0.1"/></Peers>
 </Discovery></Domain></CycloneDDS>"""
 
 
@@ -67,7 +67,7 @@ def run(args, log_name, expected=0, timeout=60, env=None):
 
 def prepare():
     WORK.mkdir(parents=True, exist_ok=True)
-    # Reuse only this harness's credentials; security.sh refuses replacement, so
+    # Reuse only this harness's credentials; scripts/security.sh refuses replacement, so
     # rerunning QA cannot silently invalidate the real team's certificate set
     for directory in (TRUSTED, FOREIGN):
         if not directory.exists():
@@ -164,7 +164,7 @@ def checks():
                  *(["--create"] if i == 1 else [])],
                 f"game-client-{i}.log")) for i in (1, 2)]
             for client in participants:
-                require(client.wait(timeout=75) == 0, "Actual game transport check failed")
+                require(client.wait(timeout=150) == 0, "Actual game transport check failed")
         print("PASS full-round transport with 2 actual game clients", flush=True)
         require(server.poll() is None, "Server exited during admission tests")
     print("PASS security checks against the real game server", flush=True)

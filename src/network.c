@@ -18,6 +18,17 @@ int64_t net_now(void)
     return (int64_t)now.tv_sec * INT64_C(1000000000) + now.tv_nsec;
 }
 
+bool net_valid_name(const char name[17])
+{
+    for (int i = 0; i < 17; ++i) {
+        unsigned char c = (unsigned char)name[i];
+        if (c == 0) return true;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-')) return false;
+    }
+    return false;
+}
+
 static bool checked(dds_entity_t result, const char *operation)
 {
     // DDS returns negative error codes; keep the operation in the diagnostic so
@@ -322,7 +333,7 @@ bool net_server_join(Network *net, const JoinRequest *request, const dds_sample_
 
     // Validate the already-read sample so the game server can keep its DDS loop
     // Repeated joins reply with the existing slot instead of allocating another
-    if (!info->valid_data || !sender(net->join, info, &owner) ||
+    if (!info->valid_data || !net_valid_name(request->display_name) || !sender(net->join, info, &owner) ||
         memcmp(request->client_id, owner.v, sizeof(request->client_id)) != 0 ||
         (request->room_code != 0 && (request->room_code < 100000 || request->room_code > 999999)) ||
         (net->room_code != 0 && request->room_code != net->room_code))
@@ -420,6 +431,10 @@ NetEvent net_server_input(Network *net, const Input *input, const dds_sample_inf
                 "Leave private room state");
         session->active = false;
         net->admissions[session->identity].expires = 0;
+        JoinResponse closed = {.int_player_id = 0, .room_code = net->room_code,
+            .client_token = session->client_token, .session_id = session->session_id};
+        memcpy(closed.client_id, owner.v, sizeof(closed.client_id));
+        checked(dds_write(net->replies[session->identity], &closed), "Confirm leave");
         return (NetEvent){NET_LEAVE, input->int_player_id, 'q'};
     }
     if (input->ch_direction == 'n')
@@ -503,6 +518,7 @@ bool net_client_send(Network *net, char direction)
 
         JoinRequest request = {.room_code = net->room_code,
             .create_room = net->create_room, .client_token = net->client_token};
+        memcpy(request.display_name, net->display_name, sizeof(request.display_name));
         memcpy(request.client_id, net->own_id.v, sizeof(request.client_id));
         net->last_join = now;
         return checked(dds_write(net->join, &request), "Send join request");
@@ -527,7 +543,12 @@ static bool valid_state(const GameState *state)
 {
     // Bounds protect rendering even when an authenticated peer sends bad data
     // Game rules stay in game.c; these checks only describe the transport contract
-    if (state->phase < 0 || state->phase > 3 || state->level < 0 || state->level > 2 ||
+    if (state->ready_players < 0 || state->ready_players >= (1 << NET_PLAYERS)) return false;
+    if (state->contenders < 0 || state->contenders >= (1 << NET_PLAYERS) ||
+        state->danger_lane < -1 || state->danger_lane > 3) return false;
+    for (int i = 0; i < NET_PLAYERS; ++i)
+        if (state->bonus_score[i] < 0) return false;
+    if (state->phase < 0 || state->phase > 3 || state->level < 0 || state->level > 4 ||
         state->time_left < 0 ||
         state->time_left > 60 || state->winners < 0 || state->winners >= (1 << NET_PLAYERS) ||
         state->best_score < 0)
@@ -538,6 +559,9 @@ static bool valid_state(const GameState *state)
             state->player_y[i] < 0 || state->player_y[i] > 550 || state->player_score[i] < 0 ||
             state->player_lives[i] < 0 || state->player_lives[i] > 3)
             return false;
+
+    for (int i = 0; i < NET_PLAYERS; ++i)
+        if (!net_valid_name(state->player_names[i])) return false;
 
     // Coins use the game's top-left coordinates; fixed sizes also bound draw work
     for (int i = 0; i < NET_COINS; ++i)
@@ -632,7 +656,23 @@ void net_close(Network *net)
             .ch_direction = 'q', .leave_room = true, .seq = ++net->seq,
             .session_id = net->session_id};
         if (dds_write(net->input, &leave) == DDS_RETCODE_OK)
-            dds_wait_for_acks(net->input, DDS_MSECS(200));
+        {
+            // Keep the authenticated writer discoverable until the server processes q.
+            int64_t deadline = net_now() + DDS_MSECS(1000);
+            while (net_now() < deadline)
+            {
+                JoinResponse response;
+                dds_sample_info_t info;
+                dds_guid_t owner;
+                if (take(net->response, &response, &info) && response.int_player_id == 0 &&
+                    response.room_code == net->room_code && response.client_token == net->client_token &&
+                    response.session_id == net->session_id &&
+                    memcmp(response.client_id, net->own_id.v, sizeof(response.client_id)) == 0 &&
+                    sender(net->response, &info, &owner) && same_id(&owner, &net->server_id))
+                    break;
+                dds_sleepfor(DDS_MSECS(1));
+            }
+        }
     }
 
     dds_delete(net->participant);

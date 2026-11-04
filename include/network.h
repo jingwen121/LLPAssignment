@@ -104,6 +104,7 @@ typedef struct
     // never authorizes movement or reveals another player's admission token
     int32_t room_code;
     bool create_room;
+    char display_name[17];
     uint64_t client_token;
     int32_t pending_room;
     uint64_t pending_token;
@@ -118,6 +119,7 @@ bool net_open(Network *net, bool server, const char *credentials);
 bool net_participant(Network *net, bool server, const char *credentials);
 void net_close(Network *net);
 int64_t net_now(void);
+bool net_valid_name(const char name[17]);
 
 // Read 1 event and let the game choose a slot for a new player; handle NET_JOIN
 // with net_server_accept before polling again; 0 replies that the server is full

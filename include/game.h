@@ -36,10 +36,11 @@
 
 /* ---------- Timing ---------- */
 #define TICK_MS          16 /* ~60 game updates per second */
-#define ROUND_SECONDS    60
-#define LEVEL_ONE_SECONDS (ROUND_SECONDS / 2)
-#define LEVEL_TWO_SECONDS (ROUND_SECONDS / 2)
-#define RESULTS_SECONDS  5
+#define ROUND_SECONDS    90
+#define LEVEL_ONE_SECONDS (ROUND_SECONDS / 3)
+#define LEVEL_TWO_SECONDS (ROUND_SECONDS / 3)
+#define BOMB_PENALTY 3
+#define BONUS_SECONDS 15
 
 typedef enum
 {
@@ -51,10 +52,12 @@ typedef enum
 
 typedef struct
 {
+    char     name[17];
     bool     active;
     int      x, y; /* top-left corner of the square */
     int      score;
-    int      lives;
+    int      lives; /* reserved for existing snapshots; never used to eliminate */
+    uint32_t bomb_seq;
     uint32_t collect_seq; /* increments once for each coin caught */
     uint64_t last_bomb_hit_ms;
     int      dir;  /* latest input: -1 left, 0 none, +1 right */
@@ -88,6 +91,11 @@ typedef struct
     uint8_t  winners;  /* bitmask: bit 0 = player 1 ... ties set several bits */
     int      best_score;
     int      level;
+    uint8_t ready_players;
+    uint8_t contenders;
+    int bonus_score[MAX_PLAYERS];
+    uint32_t level_start_tick;
+    int danger_lane; /* -1 when no warning */
     Player   players[MAX_PLAYERS]; /* player ID = index + 1 */
     Coin     coins[MAX_COINS];
     Bomb     bombs[MAX_BOMBS];
@@ -106,7 +114,7 @@ bool game_remove_player(Game *g, int id);
  * Returns false (and ignores the input) if the ID or direction is invalid. */
 bool game_set_input(Game *g, int id, int dir, uint64_t now_ms);
 
-/* Advance this room from the level break into level 2. */
+/* Record a ready vote in the lobby, at a level break or results; all active players must agree. */
 bool game_continue_level(Game *g, int player_id, uint64_t now_ms);
 
 /* Advance the game by one tick. Call every TICK_MS milliseconds. */
@@ -114,7 +122,6 @@ void game_tick(Game *g, uint64_t now_ms);
 
 /* Number of players currently in the game. */
 int  game_num_active(const Game *g);
-int  game_num_alive(const Game *g);
 
 /* Debug: print phase, timer, scores and coins to the terminal. */
 void game_print(const Game *g);

@@ -956,7 +956,7 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action, 
     if (g_screen == UI_GAME && (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER))
     {
         pthread_mutex_lock(&g_mutex);
-        if (g_client.has_state && g_client.state.phase == 2)
+        if (g_client.has_state && (g_client.state.phase == 0 || g_client.state.phase == 2 || g_client.state.phase == 3))
             g_client.continue_requested = true;
         pthread_mutex_unlock(&g_mutex);
         return;
@@ -1038,7 +1038,7 @@ static void *dds_worker(void *credentials)
         }
         if (updated)
         {
-            if (incoming.phase != 2)
+            if (incoming.phase != 0 && incoming.phase != 2 && incoming.phase != 3)
                 g_client.continue_requested = false;
             if (g_client.has_state)
                 for (int p = 0; p < MAX_PLAYERS; ++p)
@@ -1277,7 +1277,7 @@ int main(int argc, char **argv)
             else if (point_in_rect(mx, my, 264, 300, 272, 58))
             {
                 pthread_mutex_lock(&g_mutex);
-                if (g_client.has_state && g_client.state.phase == 2)
+                if (g_client.has_state && (g_client.state.phase == 0 || g_client.state.phase == 2 || g_client.state.phase == 3))
                     g_client.continue_requested = true;
                 pthread_mutex_unlock(&g_mutex);
             }

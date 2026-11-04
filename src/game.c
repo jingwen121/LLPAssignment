@@ -91,12 +91,12 @@ static void spawn_bomb(Game *g, Bomb *b, bool spread_out)
     b->y = -b->size - (spread_out ? rand_range(0, HEIGHT) : rand_range(0, 220));
 }
 
-static void print_winners(uint8_t mask)
+static void print_winners(const Game *g, uint8_t mask)
 {
     int count = 0;
     for (int i = 0; i < MAX_PLAYERS; i++)
         if (mask & (1u << i))
-            printf("%sPlayer %d", count++ ? " & " : "", i + 1);
+            printf("%s%s", count++ ? " & " : "", g->players[i].name);
     printf(count > 1 ? " (tie)\n" : "\n");
 }
 
@@ -116,7 +116,7 @@ static void move_players(Game *g, uint64_t now_ms)
         // Skip empty slots: nobody has joined with this ID
         if (!p->active)
             continue;
-        if (p->lives <= 0)
+        if (g->level == 4 && !(g->contenders & (1u << i)))
             continue;
 
         /* The client sends an input about every 10 ms WHILE a key is held,
@@ -172,7 +172,7 @@ static void move_coins(Game *g)
 
 static void move_bombs(Game *g)
 {
-    if (g->level < 2)
+    if (g->level < 2 || g->level == 4)
         return;
 
     for (int i = 0; i < MAX_BOMBS; ++i)
@@ -208,7 +208,7 @@ static int find_overlapping_player(const Game *g, int object_x, int object_y,
         for (int lane = 0; lane < 4; ++lane)
         {
             const Player *p = &g->players[i + lane];
-            bool ready = p->active && p->lives > 0;
+            bool ready = p->active && (g->level != 4 || (g->contenders & (1u << (i + lane))));
             if (ready && enforce_bomb_cooldown && p->last_bomb_hit_ms != 0 &&
                 now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS)
                 ready = false;
@@ -258,7 +258,7 @@ static int find_overlapping_player(const Game *g, int object_x, int object_y,
     for (; i < MAX_PLAYERS; ++i)
     {
         const Player *p = &g->players[i];
-        if (!p->active || p->lives <= 0)
+        if (!p->active || (g->level == 4 && !(g->contenders & (1u << i))))
             continue;
         if (enforce_bomb_cooldown && p->last_bomb_hit_ms != 0 &&
             now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS)
@@ -285,10 +285,11 @@ static void check_catches(Game *g)
             continue;
 
         Player *p = &g->players[player_index];
-        p->score += coin->value;
+        if (g->level == 4) g->bonus_score[player_index] += coin->value;
+        else p->score += coin->value;
         ++p->collect_seq;
-        printf("Player %d caught a %s coin (+%d) -> score %d\n",
-               player_index + 1, coin->gold ? "GOLD" : "normal",
+        printf("%s caught a %s coin (+%d) -> score %d\n",
+               p->name, coin->gold ? "GOLD" : "normal",
                coin->value, p->score);
 
         /* Respawn after selecting the lowest-ID overlapping player. */
@@ -298,7 +299,7 @@ static void check_catches(Game *g)
 
 static void check_bomb_hits(Game *g, uint64_t now_ms)
 {
-    if (g->level < 2)
+    if (g->level < 2 || g->level == 4)
         return;
 
     for (int b = 0; b < MAX_BOMBS; ++b)
@@ -312,10 +313,11 @@ static void check_bomb_hits(Game *g, uint64_t now_ms)
             continue;
 
         Player *p = &g->players[player_index];
-        --p->lives;
+        p->score = p->score > BOMB_PENALTY ? p->score - BOMB_PENALTY : 0;
+        ++p->bomb_seq;
         p->last_bomb_hit_ms = now_ms;
-        printf("Player %d hit a bomb -> %d lives left\n",
-               player_index + 1, p->lives);
+        printf("%s hit a bomb -> %d points\n",
+               p->name, p->score);
         spawn_bomb(g, bomb, false);
     }
 }
@@ -328,7 +330,10 @@ static void check_bomb_hits(Game *g, uint64_t now_ms)
   * MIN_PLAYERS (2) have joined. Sets up a fresh round. */
 static void start_round(Game *g, uint64_t now_ms)
 {
+    g->ready_players = 0;
     g->level = 1;
+    g->contenders = 0;
+    g->danger_lane = -1;
     for (int i = 0; i < MAX_PLAYERS; i++)
         g->players[i].score = 0;
 
@@ -356,9 +361,12 @@ static void start_round(Game *g, uint64_t now_ms)
     printf("=== Round started with %d players ===\n", game_num_active(g));
 }
 
-static void start_level_two(Game *g, uint64_t now_ms)
+static void start_next_level(Game *g, uint64_t now_ms)
 {
-    g->level = 2;
+    g->ready_players = 0;
+    ++g->level;
+    g->level_start_tick = g->tick;
+    g->danger_lane = -1;
     g->phase = PHASE_PLAYING;
     g->phase_end_ms = now_ms + (uint64_t)LEVEL_TWO_SECONDS * 1000;
 
@@ -374,7 +382,7 @@ static void start_level_two(Game *g, uint64_t now_ms)
     for (int i = 0; i < MAX_BOMBS; ++i)
         spawn_bomb(g, &g->bombs[i], true);
 
-    printf("=== Level 2 started: faster coins, bombs and 3 lives ===\n");
+    printf("=== Level %d started: bombs cost 3 points ===\n", g->level);
 }
 
 /* Find the highest score among active players. Every player with that
@@ -386,32 +394,52 @@ static void end_round(Game *g, uint64_t now_ms)
 
     for (int i = 0; i < MAX_PLAYERS; i++)
     {
-        if (!g->players[i].active || g->players[i].lives <= 0)
+        if (!g->players[i].active || (g->level == 4 && !(g->contenders & (1u << i))))
             continue; // skip empty slots
 
-        if (g->players[i].score > best) // new highest score
+        int score = g->level == 4 ? g->bonus_score[i] : g->players[i].score;
+        if (score > best) // new highest score
         {
-            best = g->players[i].score;
+            best = score;
             mask = (uint8_t)(1u << i);  // forget old winners, only this player
         }
-        else if (g->players[i].score == best)  // equal to highest = tie
+        else if (score == best)  // equal to highest = tie
         {
             mask |= (uint8_t)(1u << i); // add this player alongside
         }
     }
 
+    if (g->level >= 3 && mask && (mask & (mask - 1))) {
+        g->contenders = mask;
+        g->winners = mask;
+        g->level = 4;
+        g->danger_lane = -1;
+        memset(g->bonus_score, 0, sizeof(g->bonus_score));
+        for (int i = 0; i < MAX_PLAYERS; ++i) {
+            g->players[i].x = i * (WIDTH / MAX_PLAYERS) + 55;
+            g->players[i].dir = 0;
+        }
+        for (int i = 0; i < MAX_COINS; ++i) spawn_coin(g, &g->coins[i], true);
+        for (int i = 0; i < MAX_BOMBS; ++i) g->bombs[i].active = false;
+        g->phase = PHASE_PLAYING;
+        g->phase_end_ms = now_ms + BONUS_SECONDS * 1000;
+        return;
+    }
     for (int i = 0; i < MAX_COINS; i++)
         g->coins[i].active = false;
     for (int i = 0; i < MAX_BOMBS; i++)
         g->bombs[i].active = false;
 
-    g->best_score = best < 0 ? 0 : best;
+    g->best_score = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+        if (mask & (1u << i)) { g->best_score = g->players[i].score; break; }
     g->winners = mask;
     g->phase = PHASE_RESULTS;
-    g->phase_end_ms = now_ms + (uint64_t)RESULTS_SECONDS * 1000;
+    g->ready_players = 0;
+    g->phase_end_ms = 0;
 
     printf("=== Round over! Best score %d. Winner: ", g->best_score);
-    print_winners(mask);
+    print_winners(g, mask);
 }
 
 /* ======================================================================
@@ -422,6 +450,7 @@ void game_init(Game *g)
 {
     memset(g, 0, sizeof(*g));
     g->phase = PHASE_WAITING;
+    g->danger_lane = -1;
 }
 
 int game_num_active(const Game *g)
@@ -430,15 +459,6 @@ int game_num_active(const Game *g)
     for (int i = 0; i < MAX_PLAYERS; i++)
         if (g->players[i].active)
             n++;
-    return n;
-}
-
-int game_num_alive(const Game *g)
-{
-    int n = 0;
-    for (int i = 0; i < MAX_PLAYERS; i++)
-        if (g->players[i].active && g->players[i].lives > 0)
-            ++n;
     return n;
 }
 
@@ -458,7 +478,9 @@ int game_add_player(Game *g)
         memset(p, 0, sizeof(*p));
 
 
+        snprintf(p->name, sizeof(p->name), "Player %d", i + 1);
         p->active = true;
+        g->ready_players &= (uint8_t)~(1u << i);
         p->lives = LIVES_PER_PLAYER;
         
         /* Start position: split the window into MAX_PLAYERS equal lanes
@@ -469,7 +491,6 @@ int game_add_player(Game *g)
          *  each ID has its own lane, so new players never start on top of each other. */
         p->x = i * (WIDTH / MAX_PLAYERS) + (WIDTH / MAX_PLAYERS - PLAYER_W) / 2;
         p->y = PLAYER_Y;// Everyone stands on the bottom row and only moves left/right
-        printf("Player %d joined (%d active)\n", i + 1, game_num_active(g));
         return i + 1;   /* player ID = index + 1 */
     }
     printf("Join rejected: game full\n");
@@ -481,7 +502,8 @@ bool game_remove_player(Game *g, int id)
     if (id < 1 || id > MAX_PLAYERS || !g->players[id - 1].active)
         return false;
     g->players[id - 1].active = false;
-    printf("Player %d left (%d active)\n", id, game_num_active(g));
+    g->ready_players &= (uint8_t)~(1u << (id - 1));
+    printf("%s left (%d active)\n", g->players[id - 1].name, game_num_active(g));
     return true;
 }
 
@@ -498,13 +520,23 @@ bool game_set_input(Game *g, int id, int dir, uint64_t now_ms)
     return true;
 }
 
+static void advance_when_ready(Game *g, uint64_t now_ms)
+{
+    uint8_t active = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+        if (g->players[i].active) active |= (uint8_t)(1u << i);
+    if (game_num_active(g) < MIN_PLAYERS || (g->ready_players & active) != active) return;
+    if (g->phase == PHASE_LEVEL_BREAK) start_next_level(g, now_ms);
+    else if (g->phase == PHASE_RESULTS || g->phase == PHASE_WAITING) start_round(g, now_ms);
+}
+
 bool game_continue_level(Game *g, int player_id, uint64_t now_ms)
 {
-    if (g->phase != PHASE_LEVEL_BREAK || player_id < 1 ||
+    if ((g->phase != PHASE_LEVEL_BREAK && g->phase != PHASE_RESULTS && g->phase != PHASE_WAITING) || player_id < 1 ||
         player_id > MAX_PLAYERS || !g->players[player_id - 1].active)
         return false;
-
-    start_level_two(g, now_ms);
+    g->ready_players |= (uint8_t)(1u << (player_id - 1));
+    advance_when_ready(g, now_ms);
     return true;
 }
 
@@ -518,46 +550,61 @@ void game_tick(Game *g, uint64_t now_ms)
     switch (g->phase)
     {
         case PHASE_WAITING:
-            if (game_num_active(g) >= MIN_PLAYERS)
-                start_round(g, now_ms); // PLAYING, starts the 60 s timer
+            advance_when_ready(g, now_ms);
             break;
 
         case PHASE_PLAYING:
+            if (game_num_active(g) < MIN_PLAYERS) { end_round(g, now_ms); break; }
+            if (g->level == 3) {
+                uint32_t elapsed = g->tick - g->level_start_tick;
+                unsigned period = 240;
+                if (elapsed >= 1250) { elapsed -= 1250; period = 180; }
+                unsigned step = elapsed % period;
+                int lane = (int)((elapsed / period) % 4);
+                g->danger_lane = step < 94 ? lane : -1;
+                if (step == 1) {
+                    Coin *c = &g->coins[0];
+                    c->active = true; c->gold = true; c->size = GOLD_SIZE;
+                    c->value = GOLD_VALUE; c->speed = 5;
+                    c->x = lane * 200 + 90; c->y = 80;
+                    for (int i = 1; i < MAX_COINS; ++i)
+                        if (g->coins[i].gold) { g->coins[i].gold = false; g->coins[i].size = COIN_SIZE; g->coins[i].value = COIN_VALUE; }
+                }
+                if (step == 94) {
+                    for (int i = 0; i < MAX_BOMBS; ++i) {
+                        Bomb *b = &g->bombs[i]; spawn_bomb(g, b, false);
+                        b->x = lane * 200 + i * 48; b->y = PLAYER_Y - 130; b->speed = 10;
+                    }
+                }
+            }
             move_coins(g);
             check_catches(g);
             move_bombs(g);
             check_bomb_hits(g, now_ms);
 
-            if (g->level == 1 && now_ms >= g->phase_end_ms)
+            if (g->level < 3 && now_ms >= g->phase_end_ms)
             {
+                g->ready_players = 0;
                 g->phase = PHASE_LEVEL_BREAK;
                 g->phase_end_ms = 0;
                 for (int i = 0; i < MAX_COINS; ++i)
                     g->coins[i].active = false;
                 for (int i = 0; i < MAX_BOMBS; ++i)
                     g->bombs[i].active = false;
-                printf("=== Level 1 complete: waiting for Continue ===\n");
+                printf("=== Level %d complete: waiting for Continue ===\n", g->level);
             }
-            else if (g->level == 2 &&
-                     (now_ms >= g->phase_end_ms || game_num_alive(g) < MIN_PLAYERS))
+            else if (g->level >= 3 && now_ms >= g->phase_end_ms)
                 end_round(g, now_ms);
             break;
 
         case PHASE_LEVEL_BREAK:
             if (game_num_active(g) < MIN_PLAYERS)
                 end_round(g, now_ms);
+            else advance_when_ready(g, now_ms);
             break;
 
         case PHASE_RESULTS:
-            if (now_ms >= g->phase_end_ms)
-            {
-                // Results time is up: back to the lobby and clear winners.
-                // If 2+ players are still here, the NEXT tick starts a new
-                // round automatically, so the game keeps going.
-                g->phase   = PHASE_WAITING;
-                g->winners = 0;
-                printf("=== Back to lobby ===\n");
-            }
+            advance_when_ready(g, now_ms);
             break;
     }
 
@@ -581,7 +628,7 @@ void game_print(const Game *g)
     // (%3d pads x to 3 characters, so columns line up)
     for (int i = 0; i < MAX_PLAYERS; i++)
         if (g->players[i].active)
-            printf("P%d: x=%3d score=%d lives=%d  ", i + 1, g->players[i].x,
+            printf("%s: x=%3d score=%d lives=%d  ", g->players[i].name, g->players[i].x,
                    g->players[i].score, g->players[i].lives);
     printf("\n");
 }
