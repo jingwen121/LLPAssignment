@@ -13,9 +13,9 @@ make
 ```
 
 On Debian/Ubuntu/WSL, the Makefile checks for the compiler, Cyclone DDS, GLFW,
-OpenGL and OpenSSL development packages. If any are missing, it asks `sudo` to
-install them with `apt`. It then generates the DDS message code, builds the
-server and client, creates local credentials on the first build, and copies
+OpenGL, OpenSSL and SDL2_mixer development packages. If any are missing, it
+asks `sudo` to install them with `apt`. It then generates the DDS message code,
+builds the server and client, creates local credentials on the first build, and copies
 the executables to the project root as `./server` and `./client` (the originals
 remain in `build/`).
 
@@ -71,6 +71,9 @@ continue to protect network play.
   from the room; cancel returns to the previous screen.
 - At the Level 1 intermission, click **Continue to Level 2** or press Enter;
   the server advances the whole room together.
+- Level 1 and Level 2 play their respective bundled MP3 tracks. In the game
+  HUD's upper-right corner, click **SND/OFF** to mute or unmute and use **−/+**
+  to adjust the music volume.
 
 ## Graphics and game screens
 

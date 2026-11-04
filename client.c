@@ -4,6 +4,8 @@
 #endif
 
 #include <GLFW/glfw3.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_mixer.h>
 #include <dds/dds.h>
 #include <math.h>
 #include <pthread.h>
@@ -64,6 +66,8 @@
 #define HEART_SHEET_PATH "assets/effects/colored_hearts.rgba"
 #define HEART_SHEET_WIDTH 116
 #define HEART_SHEET_HEIGHT 85
+#define LEVEL_ONE_MUSIC_PATH "assets/music/level1.mp3"
+#define LEVEL_TWO_MUSIC_PATH "assets/music/level2.mp3"
 
 typedef enum { UI_MAIN_MENU, UI_JOIN_CODE, UI_CONNECTING, UI_GAME, UI_EXIT_CONFIRM } UiScreen;
 
@@ -129,10 +133,69 @@ static GLuint g_bomb_texture;
 static GLuint g_plus_texture;
 static GLuint g_heart_texture;
 static PickupEffect g_pickup_effects[MAX_PLAYERS];
+static Mix_Music *g_level_one_music;
+static Mix_Music *g_level_two_music;
+static bool g_audio_ready;
+static bool g_music_muted;
+static int g_music_volume = MIX_MAX_VOLUME * 3 / 5;
+static int g_music_track = -1;
 
 static void glfw_error_callback(int code, const char *description)
 {
     fprintf(stderr, "GLFW error %d: %s\n", code, description ? description : "unknown error");
+}
+
+static void apply_music_volume(void)
+{
+    if (g_audio_ready)
+        Mix_VolumeMusic(g_music_muted ? 0 : g_music_volume);
+}
+
+static void update_game_music(const GameState *state, bool has_state)
+{
+    if (!g_audio_ready)
+        return;
+
+    int track = !has_state || state->phase != 1 ? -1 :
+                (state->level >= 2 ? 1 : 0);
+    if (track == g_music_track)
+        return;
+
+    Mix_HaltMusic();
+    g_music_track = track;
+    Mix_Music *music = track == 0 ? g_level_one_music :
+                       track == 1 ? g_level_two_music : NULL;
+    if (music && Mix_PlayMusic(music, -1) != 0)
+        fprintf(stderr, "Could not play level music: %s\n", Mix_GetError());
+    apply_music_volume();
+}
+
+static void initialize_audio(void)
+{
+    if (SDL_Init(SDL_INIT_AUDIO) != 0)
+    {
+        fprintf(stderr, "Audio unavailable; continuing without music: %s\n", SDL_GetError());
+        return;
+    }
+    Mix_Init(MIX_INIT_MP3);
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) != 0)
+    {
+        fprintf(stderr, "Audio unavailable; continuing without music: %s\n", Mix_GetError());
+        Mix_Quit();
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        return;
+    }
+
+    g_audio_ready = true;
+    g_level_one_music = Mix_LoadMUS(LEVEL_ONE_MUSIC_PATH);
+    if (!g_level_one_music)
+        fprintf(stderr, "Could not load Level 1 music (%s): %s\n",
+                LEVEL_ONE_MUSIC_PATH, Mix_GetError());
+    g_level_two_music = Mix_LoadMUS(LEVEL_TWO_MUSIC_PATH);
+    if (!g_level_two_music)
+        fprintf(stderr, "Could not load Level 2 music (%s): %s\n",
+                LEVEL_TWO_MUSIC_PATH, Mix_GetError());
+    apply_music_volume();
 }
 
 static void update_viewport(GLFWwindow *window, int framebuffer_width, int framebuffer_height)
@@ -611,6 +674,7 @@ static const char *phase_name(int phase)
 }
 
 static void draw_button(float x, float y, float w, float h, const char *label, bool hovered);
+static void draw_sound_controls(void);
 
 static void draw_arena(const GameState *state, bool has_state, int player_id,
                        uint32_t room_code, const int facing[MAX_PLAYERS],
@@ -653,6 +717,7 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     int shown_capacity = state->phase == 0 ? 2 : MAX_PLAYERS;
     snprintf(text, sizeof(text), "PLAYERS  %d/%d", active_count, shown_capacity);
     draw_centered(710, 22, 1.2f, text);
+    draw_sound_controls();
 
     if (state->phase == 1 && g_viewport.height > 0)
     {
@@ -755,6 +820,19 @@ static void draw_button(float x, float y, float w, float h, const char *label, b
     // Match both axes to the actual font dimensions, including scaled labels
     float text_height = stb_easy_font_height((char *)label) * 1.15f;
     draw_centered(x + w * 0.5f, y + (h - text_height) * 0.5f, 1.15f, label);
+}
+
+static void draw_sound_controls(void)
+{
+    draw_button(640, 45, 40, 24, g_music_muted ? "OFF" : "SND", false);
+    draw_button(684, 45, 22, 24, "-", false);
+    for (int segment = 0; segment < 5; ++segment)
+    {
+        bool on = !g_music_muted && g_music_volume >= (segment + 1) * MIX_MAX_VOLUME / 5;
+        glColor3f(on ? 0.30f : 0.12f, on ? 0.82f : 0.20f, on ? 0.82f : 0.30f);
+        draw_rect(712.0f + (float)segment * 9.0f, 53, 7, 9);
+    }
+    draw_button(766, 45, 22, 24, "+", false);
 }
 
 static void draw_menu_background(void)
@@ -1050,6 +1128,7 @@ int main(int argc, char **argv)
     g_plus_texture = load_rgba_texture(PLUS_SHEET_PATH, PLUS_SHEET_WIDTH, PLUS_SHEET_HEIGHT);
     g_heart_texture = load_rgba_texture(HEART_SHEET_PATH, HEART_SHEET_WIDTH, HEART_SHEET_HEIGHT);
     initialize_menu_cats(glfwGetTime());
+    initialize_audio();
 
     pthread_mutex_lock(&g_mutex); g_client.running = true; g_client.direction = 'n'; pthread_mutex_unlock(&g_mutex);
     pthread_t worker;
@@ -1093,13 +1172,31 @@ int main(int argc, char **argv)
             else if (point_in_rect(mx, my, 264, 385, 272, 50))
                 g_screen = g_exit_from_game ? UI_GAME : UI_MAIN_MENU;
         }
-        else if (g_screen == UI_GAME && clicked &&
-                 point_in_rect(mx, my, 264, 300, 272, 58))
+        else if (g_screen == UI_GAME && clicked)
         {
-            pthread_mutex_lock(&g_mutex);
-            if (g_client.has_state && g_client.state.phase == 2)
-                g_client.continue_requested = true;
-            pthread_mutex_unlock(&g_mutex);
+            if (point_in_rect(mx, my, 640, 45, 40, 24))
+            {
+                g_music_muted = !g_music_muted;
+                apply_music_volume();
+            }
+            else if (point_in_rect(mx, my, 684, 45, 22, 24))
+            {
+                g_music_volume = g_music_volume > 16 ? g_music_volume - 16 : 0;
+                apply_music_volume();
+            }
+            else if (point_in_rect(mx, my, 766, 45, 22, 24))
+            {
+                g_music_volume = g_music_volume < MIX_MAX_VOLUME - 16 ?
+                                 g_music_volume + 16 : MIX_MAX_VOLUME;
+                apply_music_volume();
+            }
+            else if (point_in_rect(mx, my, 264, 300, 272, 58))
+            {
+                pthread_mutex_lock(&g_mutex);
+                if (g_client.has_state && g_client.state.phase == 2)
+                    g_client.continue_requested = true;
+                pthread_mutex_unlock(&g_mutex);
+            }
         }
 
         pthread_mutex_lock(&g_mutex);
@@ -1120,6 +1217,7 @@ int main(int argc, char **argv)
         pthread_mutex_unlock(&g_mutex);
 
         double frame_time = glfwGetTime();
+        update_game_music(&state, has_state);
         if (has_state)
             observe_coin_collects(&state, frame_time);
 
@@ -1158,6 +1256,15 @@ int main(int argc, char **argv)
 
     pthread_mutex_lock(&g_mutex); g_client.running = false; pthread_mutex_unlock(&g_mutex);
     pthread_join(worker, NULL);
+    if (g_audio_ready)
+    {
+        Mix_HaltMusic();
+        if (g_level_one_music) Mix_FreeMusic(g_level_one_music);
+        if (g_level_two_music) Mix_FreeMusic(g_level_two_music);
+        Mix_CloseAudio();
+        Mix_Quit();
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    }
     if (cat_east) glDeleteTextures(1, &cat_east);
     if (cat_west) glDeleteTextures(1, &cat_west);
     if (g_tofu_texture) glDeleteTextures(1, &g_tofu_texture);

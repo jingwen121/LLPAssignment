@@ -6,6 +6,8 @@ GLFW_CFLAGS = $(shell pkg-config --cflags glfw3)
 CYCLONE_LIBS = $(shell pkg-config --libs CycloneDDS)
 GLFW_LIBS = $(shell pkg-config --libs glfw3)
 OPENSSL_LIBS = $(shell pkg-config --libs openssl)
+SDL_MIXER_CFLAGS = $(shell pkg-config --cflags SDL2_mixer)
+SDL_MIXER_LIBS = $(shell pkg-config --libs SDL2_mixer)
 DDS_LIBS = $(CYCLONE_LIBS) -pthread $(OPENSSL_LIBS)
 EFFECT_ASSETS = assets/effects/bomb_spritesheet.rgba assets/effects/plus_spritesheet.rgba assets/effects/colored_hearts.rgba
 SANFLAGS = -std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -36,19 +38,20 @@ check-deps:
 	   command -v pkg-config >/dev/null 2>&1 && \
 	   command -v idlc >/dev/null 2>&1 && \
 	   command -v openssl >/dev/null 2>&1 && \
-	   pkg-config --exists CycloneDDS glfw3 openssl && \
+	   pkg-config --exists CycloneDDS glfw3 openssl SDL2_mixer && \
 	   test -r /usr/include/openssl/pem.h && \
 	   test -r /usr/include/GLFW/glfw3.h && \
+	   test -r /usr/include/SDL2/SDL_mixer.h && \
 	   test -r /usr/include/GL/gl.h; then \
 	    echo 'Build dependencies are installed.'; \
 	  elif command -v apt-get >/dev/null 2>&1; then \
 	    echo 'Installing missing build dependencies with apt...'; \
 	    if [ "$$(id -u)" -eq 0 ]; then \
 	      apt-get update && \
-	      apt-get install -y build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev libssl-dev; \
+	      apt-get install -y build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev libssl-dev libsdl2-mixer-dev; \
 	    elif command -v sudo >/dev/null 2>&1; then \
 	      sudo apt-get update && \
-	      sudo apt-get install -y build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev libssl-dev; \
+	      sudo apt-get install -y build-essential pkg-config cyclonedds-dev cyclonedds-tools libglfw3-dev libgl1-mesa-dev libssl-dev libsdl2-mixer-dev; \
 	    else \
 	      echo 'Cannot install packages: run as root or install sudo.' >&2; exit 1; \
 	    fi; \
@@ -56,9 +59,10 @@ check-deps:
 	       ! command -v pkg-config >/dev/null 2>&1 || \
 	       ! command -v idlc >/dev/null 2>&1 || \
 	       ! command -v openssl >/dev/null 2>&1 || \
-	       ! pkg-config --exists CycloneDDS glfw3 openssl || \
+	       ! pkg-config --exists CycloneDDS glfw3 openssl SDL2_mixer || \
 	       ! test -r /usr/include/openssl/pem.h || \
 	       ! test -r /usr/include/GLFW/glfw3.h || \
+	       ! test -r /usr/include/SDL2/SDL_mixer.h || \
 	       ! test -r /usr/include/GL/gl.h; then \
 	        echo 'Dependency installation did not provide all required tools.' >&2; exit 1; \
 	    fi; \
@@ -102,8 +106,8 @@ build/messages.c build/messages.h &: messages.idl | build
 build/server: server.c game.c game.h network.c network.h build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) server.c game.c network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/client: client.c network.c network.h stb_easy_font.h $(EFFECT_ASSETS) build/messages.c build/messages.h
-	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(CFLAGS) client.c network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) -lGL -lm
+build/client: client.c network.c network.h stb_easy_font.h $(EFFECT_ASSETS) assets/music/level1.mp3 assets/music/level2.mp3 build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(SDL_MIXER_CFLAGS) $(CFLAGS) client.c network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) $(SDL_MIXER_LIBS) -lGL -lm
 
 build/test_validation: test_validation.c network.c network.h build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) test_validation.c network.c build/messages.c -o $@ $(DDS_LIBS)
