@@ -1,129 +1,139 @@
 # Coin Rush
 
-Coin Rush is a small real-time multiplayer game in C using GLFW, fixed-function
-OpenGL and Cyclone DDS. The server owns the simulation. Clients use room codes
-to create or join isolated matches.
+Catch coins, dodge bombs and compete for the highest score across three levels.
+Coin Rush is a real-time multiplayer game written in C with GLFW, OpenGL and
+Cyclone DDS. Each room supports **2â€“5 players** and one server can run up to
+**8 rooms**.
 
-## Build in WSL
+![Coin Rush main menu](docs/screenshots/menu.png)
 
-From the project directory, build the game with:
+## Play on Windows
+
+You need WSL 2 with working WSLg graphics and a Linux distribution containing
+**Cyclone DDS 0.10.4 or 0.10.5**. Each computer builds its own Linux executable.
+The launchers check dependencies and can install missing development packages
+on Debian/Ubuntu using `apt`.
+
+1. On the host computer, double-click **`server.bat`** and keep its window open.
+2. Open **`client.bat`** on the host and each player's computer.
+3. When prompted for a WSL distribution, enter its installed name, such as `Ubuntu`.
+   The launcher remembers the choice.
+4. Enter your display name. One player chooses **Create Room** and shares the
+   six-digit room code; everyone else chooses **Join a Room**.
+5. Every player presses **Ready** or **Enter**. The match starts once at least
+   two players are present and everyone is ready.
+
+Display names accept up to 16 letters, digits, spaces, hyphens or underscores.
+
+For local testing, open `client.bat` more than once. Clients automatically choose
+different available local credentials. **Only the focused client window plays
+audio**, so several local windows do not stack their music.
+
+Players on another computer need a one-time invite from the host; see
+[Set up another computer](#set-up-another-computer).
+
+## How a match works
+
+| Stage | Duration | What changes |
+| --- | --- | --- |
+| Level 1 | 30 seconds | Catch normal coins for **1 point** and gold coins for **3 points**. |
+| Level 2 | 30 seconds | Coins fall faster and bombs appear. Each bomb hit deducts **3 points**. |
+| Level 3 | 30 seconds | Red floor warnings precede bomb bursts, with gold coins tempting players into danger zones. Warnings become more frequent near the end. |
+| Tie-breaker | 15 seconds | Tied leaders compete in a coin-only round while other players spectate. Another tie repeats the bonus round among its tied leaders. |
+
+- Scores carry across the three levels. Bomb penalties stop at zero; nobody is eliminated.
+- At each level break, everyone must confirm before the next level begins.
+  A green checkmark confirms your vote and the ready count shows the room's progress.
+- The final leaderboard ranks players by their total score. Bonus points resolve
+  first-place ties separately from that total.
+- There is no automatic rematch. Everyone must confirm **Continue to Next Round**;
+  a new match resets all scores to zero.
+- Duplicate ready clicks count once. Players who leave are removed from the ready count.
+
+## Controls
+
+| Action | Control |
+| --- | --- |
+| Move left/right | **A / D** or **Left / Right arrows** |
+| Confirm readiness | **Enter** or the on-screen Ready/Continue button |
+| Join a room | Enter its six-digit code, then press **Enter** or click **Join Room** |
+| Edit a name or room code | Hold **Backspace** to erase; **Ctrl+A** selects all; typing replaces the selection; **Backspace/Delete** clears it |
+| Toggle fullscreen | **F11** |
+| Open the exit confirmation | **Escape** during a match |
+| Mute/unmute | Click the **speaker icon** |
+| Adjust audio volume | Click **âˆ’ / +** or the volume bars |
+
+Each level and the bonus round have their own music track. Coin pickups and
+bomb hits play sound effects. Volume controls use a separate tick, whose level
+follows the volume setting. Music is mixed below the effects.
+
+Windows can be resized freely; the arena keeps its 4:3 layout with letterboxing.
+
+## Build and run in WSL/Linux
+
+Run commands from the project root. The build needs a C11 compiler, Cyclone DDS,
+GLFW, OpenGL, OpenSSL and SDL2_mixer development packages. The Makefile checks
+these dependencies and offers automatic installation on Debian/Ubuntu. Secure
+invite transfer also uses GnuPG and `tar`.
 
 ```sh
 make
 ```
 
-On Debian/Ubuntu/WSL, the Makefile checks for the compiler, Cyclone DDS, GLFW,
-OpenGL, OpenSSL and SDL2_mixer development packages. If any are missing, it
-asks `sudo` to install them with `apt`. It then generates the DDS message code,
-builds the server and client, creates local credentials on the first build, and copies
-the executables to the project root as `./server` and `./client` (the originals
-remain in `build/`).
+This generates the DDS message code, builds the server and client and creates
+local credentials if none exist. Build outputs live in `build/`; runnable copies
+are also installed as `./server` and `./client` for the launchers.
 
-For a clean rebuild:
+Start the server, then open clients in separate terminals:
 
 ```sh
-make clean && make
+./server
 ```
-
-### Low-level optimizations
-
-The server uses explicit SSE2 integer comparisons to check up to four player
-rectangles against each falling coin or bomb at once on x86/x86-64. It keeps a
-scalar tail and a scalar-only fallback on other CPU architectures. The fixed
-coin update and gold-count loops are manually unrolled four items at a time.
-These optimizations preserve player-ID collision priority and coin respawn
-order. The game has small fixed limits (five players and eight coins), so the
-SIMD path demonstrates vector processing but should be benchmarked before
-claiming a measurable frame-rate or CPU-time improvement.
-
-### Windows WSL launchers
-
-Double-click `server.bat` on the host PC and `client.bat` on each player PC.
-The first launch asks for a WSL distro with Cyclone DDS 0.10.4 or 0.10.5 and remembers
-that choice for that Windows account. Later launches only need the relevant
-batch file. The server window stays open while the host is running. The client
-launcher builds the client, securely imports that PC's invite on first launch,
-and opens the Create Room / Join Room menu. One player creates a room and shares
-its six-digit code; others join with that code. Every connected player presses
-Ready before the first match starts, with at least two players required.
-
-The first build verifies Cyclone DDS 0.10.4 or 0.10.5 and the linked runtime library, and
-rebuilds when the Linux distro or DDS release changes. Each PC still needs its
-own local WSL build and working WSLg graphics. For LAN discovery, follow the
-mirrored networking and firewall setup below.
-
-To launch a local demo with a server and first client in one terminal:
 
 ```sh
-make run
+./client
 ```
 
-## Start a match
+Or start a server and the first client together with `make run`, then use
+`make run-player2` in another terminal. The Create/Join menu and ready votes
+still apply.
 
-Enter a display name in the menu before creating or joining a room. Names can
-contain up to 16 letters, digits, spaces, hyphens or underscores. Names appear
-above players and in the leaderboard; certificate identities remain private
-connection identities and cannot be replaced by choosing someone else's name.
+## Set up another computer
 
-After `make`, start `./server` in the first WSL terminal. In a second terminal,
-run `./client` and choose **Create Room**. In each additional terminal, run
-`./client`; the first client to create a room hosts it, and the others choose
-**Join a Room** and enter its six-digit code. For a one-command local demo,
-`make run` starts the server and first client together.
+Each remote player needs a distinct credential signed by the host's authority.
+Do this once per player:
 
-With no credential argument, each `./client` process takes the first locally
-available signed identity in launch order. An OS file lock prevents two local
-clients from selecting the same identity, and closing a client releases it.
+1. Start `server.bat` on the host to complete its initial setup.
+2. On the host, run **`create-invite.bat`** and select an unused identity from
+   `client2` through `client6`. Choose a passphrase when prompted.
+   The WSL equivalent is `make invite PLAYER=client2`.
+3. Put that player's encrypted `.gpg` invite in the guest's project folder under
+   `invites/`. Share its passphrase separately.
+4. The guest runs **`client.bat`** and enters the passphrase. The launcher verifies
+   and imports the credential, then opens the Create/Join menu. Later launches
+   only need `client.bat`.
 
-#### Secure one-time player setup
+The import stores credentials in private WSL user storage. Share only the
+player's encrypted invite, **never** the host's `credentials-private/` folder,
+server identity or authority private key. Credential identities authenticate
+connections; display names do not grant access to another player's session.
 
-Each remote player needs a distinct certificate signed by the host's local
-authority. On the host, after the first `server.bat` setup, double-click
-`create-invite.bat` and choose `client2` through `client6`. The script creates
-an AES-encrypted invite and asks for a passphrase. Alternatively, from WSL:
+### LAN discovery on Windows
 
-```sh
-make invite PLAYER=client2
-```
-
-Put the encrypted `.gpg` file in the friend's project folder under `invites/`
-(or send it separately and have them place it there). Give the passphrase over
-a separate channel. Make a different invite for every player. The friend
-double-clicks `client.bat`; the first launch verifies/imports the invite and
-asks for its passphrase, then opens Create Room / Join Room. Later launches
-only need `client.bat`.
-
-The invite contains only that player's encrypted credential. It is imported
-into the player's private WSL home data directory with restricted file
-permissions, outside the shared project folder. Never send the plaintext
-`credentials-private/` directory, the server identity, or
-`credentials-private/authority/ca.key`.
-The encrypted invite can be included in a project zip; its passphrase must be
-shared separately. Each invite is valid only for its matching host authority.
-
-### Connect between two WSL computers on a LAN
-
-WSL 2 normally uses NAT, which can prevent Cyclone DDS multicast discovery
-from reaching another computer even when both Windows PCs can ping each other.
-On **both** PCs, use Windows 11 22H2 or later and create or edit
-`%UserProfile%\.wslconfig`. Add this under an existing `[wsl2]` section, or
-create that section if the file is new:
+Both computers must be able to discover the same server. WSL's default NAT
+networking can block DDS discovery between computers. On supported Windows 11
+systems, add this to `%UserProfile%\.wslconfig` on both computers:
 
 ```ini
 [wsl2]
 networkingMode=mirrored
 ```
 
-Then run `wsl --shutdown` in PowerShell on each PC and reopen Ubuntu. Start the
-host with `server.bat` and each player with `client.bat`. The program sets Cyclone DDS to use
-automatic participant indices (0–15), allowing a local server and clients to
-coexist and making its discovery port range predictable. The normal
-certificate authentication, signed permissions and encrypted DDS traffic
-remain enabled.
+Apply the change with `wsl --shutdown` in PowerShell, then reopen WSL and the game.
+This stops all running WSL distributions, so finish other WSL work first.
 
-If the connection still times out, allow the game's UDP discovery ports in
-the Hyper-V/WSL firewall on both PCs. In an administrator PowerShell window,
-replace `192.168.1.0/24` with your trusted LAN subnet and run:
+If discovery is still blocked, run the following in an administrator PowerShell
+window on each computer. Replace `192.168.1.0/24` with your trusted LAN subnet:
 
 ```powershell
 New-NetFirewallHyperVRule -Name "CoinRushDDS" -DisplayName "Coin Rush DDS" `
@@ -132,96 +142,66 @@ New-NetFirewallHyperVRule -Name "CoinRushDDS" -DisplayName "Coin Rush DDS" `
   -Action Allow
 ```
 
-This rule only permits inbound UDP on the game's configured discovery range
-from the specified LAN subnet. The friend should also confirm that their
-terminal prints `Using imported player identity client2` before starting
-`./client`.
+The normal game configuration uses DDS participant indices 0â€“15. The rule is
+restricted to its discovery ports and the specified subnet.
 
-The server supports up to eight rooms with up to five players in each room.
-At least two players and unanimous ready votes are required to start a round. Close a client window to leave its room.
-Clients must be able to discover the same Cyclone DDS server on the network.
+## Testing
 
-The automatic identity choice is local convenience only; DDS certificate
-authentication, signed topic permissions, session tokens and sequence checks
-continue to protect network play.
+Build first, then run the checks from the project root:
 
-## Controls
+```sh
+make test            # Gameplay, client input/audio and network validation
+make qa              # Full integration, security, room isolation and a real match
+make test-sanitize   # AddressSanitizer and UndefinedBehaviorSanitizer checks
+```
 
-- In name and room-code fields, hold Backspace to delete repeatedly, or use
-  Ctrl+A to select all and type to replace it (Backspace/Delete clears the selection).
+QA evidence is written to `build/qa/`. Client audio tests use a dummy audio device
+so automated tests do not depend on speakers or an active game window.
+`make profile` provides server-polling measurements for the local machine.
 
-- Use the left/right arrow keys or A/D to move.
-- Press F11 to enter or leave fullscreen; Escape still opens the in-game exit menu.
-- Resize the client window freely; the arena keeps its 4:3 layout and adds
-  letterboxing rather than stretching or cropping the game.
-- In the room-code screen, type six digits, press Enter to join, Backspace to
-  edit, or Escape to return to the main menu.
-- Use **Exit Game** in the main menu, or press Escape during a match, to open
-  the exit confirmation. Confirming closes the client and removes that player
-  from the room; cancel returns to the previous screen.
-- At each level intermission, click **Continue to the next level** or press Enter;
-  your green checkmark and ready count confirm your vote. Every connected player
-  must vote before the room advances.
-- Each level and the bonus round play their matching bundled MP3 track. Coin
-  pickups and bomb hits play retro sound effects. In the game
-  HUD's upper-right corner, click the **speaker icon** to mute or unmute and use **−/+**
-  to adjust music and sound-effect volume. You can also click the volume bars.
-  Music is mixed below the effects. Only the focused client window plays audio,
-  so multiple local players do not stack their music.
+The implementation uses SSE2 collision comparisons on supported x86 targets,
+with a scalar fallback and four-way loop unrolling in coin updates. Run
+`make profile` on the target machine for performance measurements.
 
-## Graphics and game screens
+## Implementation
 
-- The main menu offers room creation and room-code joining.
-- Two menu cats use randomized idle, walk and jump animations from
-  `assets/menu/tofu_idle.png`, `cato_walk.png` and `cato_jump.png`. Each client
-  gets separate starting positions and animation timing. They bounce inside
-  bounded side lanes so they stay on screen and clear of the menu buttons.
-- The lobby waits for the second player and displays the room code to share.
-- The winner screen shows the winner, top score and results countdown.
-- Players are rendered with the cat rotation sprites in `assets/cats/idle`;
-  each player has a separate tint and faces left or right as they move.
-- The HUD, falling coins, scores, timer and player positions use the latest
-  authoritative room snapshot from the server.
-- Each match has three 30-second levels, with shared Continue screens between them.
-  Click Continue or press Enter to vote ready. A green checkmark confirms your
-  vote and the ready count shows progress (for example, 1/3). Every connected
-  player must confirm; duplicate clicks count once. Departed players are removed
-  from the count, and votes reset for each new level or match.
-  Level 1 introduces coins. Level 2 adds faster coins and bombs. Bombs deduct
-  3 points (minimum zero), with a 900 ms hit cooldown. Nobody is eliminated.
-  Level 3 adds red floor warnings, tempting gold coins and bomb bursts after
-  1.5 seconds. Warnings become more frequent in the final 10 seconds.
-- Scores carry across all three levels. A first-place tie starts a 15-second
-  coin-only bonus round for tied leaders; other players spectate. Bonus points
-  are separate from match totals. Further ties replay among the tied bonus leaders.
-- The final screen ranks every connected player and marks the winner. It waits until every connected player confirms the next round. Each level and the bonus round use their matching MP3 in `assets/music/`.
-- Players can pass through one another. Coins are clipped to the playfield below
-  the HUD, including after the window is resized.
-- On WSLg, the client uses Mesa software OpenGL with two worker threads and
-  synchronized frame swaps to avoid the Intel Arc D3D12 black-frame issue.
-
-Secure channels use separate certificate identities; each identity may hold
-1 active player slot across all rooms and attempt at most 5 joins per second.
-Give each remote player a distinct credential directory.
-
-After updating from shared DDS topics, generate a new credential set in a new
-folder with `bash scripts/security.sh credentials-private`; old signed permissions cannot
-access the private channels. Start the server with
-`./build/server credentials-private/server` and each remote client with its
-corresponding credentials directory. Keep the authority private.
-
-Shared launcher and credential helpers live in `scripts/`. The root launchers
-`server.bat`, `client.bat`, and `create-invite.bat` call them automatically.
+The server owns movement, coin pickups, bomb penalties, timers, ready votes and
+results. Clients send input; the server updates positions and scores.
+DDS connections use signed player identities, encrypted private channels,
+session tokens, sequence checks and room isolation. The server validates
+incoming names and input independently of the UI.
 
 ## Project layout
 
-- `src/`: client, server, game rules and networking implementations.
-- `include/`: shared game and networking headers.
-- `tests/`: gameplay tests, network validation and the QA runner.
-- `vendor/`: the third-party pixel font header.
-- `protocol/`: DDS message definitions; generated C files stay in `build/`.
-- `scripts/`: WSL launch helpers and credential setup utilities.
-- `assets/`: graphics and music.
+```text
+assets/       Graphics, music and sound effects
+include/      Shared game and networking headers
+protocol/     DDS message definitions
+scripts/      WSL launchers and credential helpers
+src/          Client, server, game rules and networking
+tests/       Gameplay, client, network and QA tests
+vendor/       Third-party pixel font
+docs/        README screenshots
+build/        Generated code, executables, test data and logs (Git-ignored)
+```
 
-Run `make`, `make test`, `make qa`, and `make test-sanitize` from the project root.
-The Windows launchers remain at the top level.
+`Makefile`, `server.bat`, `client.bat` and `create-invite.bat` remain at the root.
+The shared Windows launcher is **`scripts/run-game.bat`**; it calls
+**`scripts/run-game-wsl.sh`** inside the selected WSL distribution.
+
+The third-party font is in `vendor/stb_easy_font.h`. Bundled effect asset notes
+and license files are retained in `assets/effects/source/`.
+
+## Troubleshooting
+
+- **The launcher asks for a distro:** use an installed name from `wsl --list --quiet`.
+  The selected distro must provide a supported Cyclone DDS version.
+- **A guest cannot connect:** check its invite belongs to this host, that each
+  player uses a different identity and that LAN discovery is allowed.
+- **The match stays in the lobby:** at least two players and all ready votes are required.
+- **Audio is silent:** focus the client window and check the speaker icon and bars.
+  Unfocused clients are intentionally silent.
+- **The UI or audio still looks old after an update:** close and reopen every
+  client and the server so all processes use the same build and message format.
+- **A rebuild is needed:** `make clean && make` regenerates build outputs.
+  It preserves `credentials-private/` and your encrypted invites.
