@@ -2,7 +2,7 @@
 
 Catch coins, dodge bombs and compete for the highest score across three levels.
 Coin Rush is a real-time multiplayer game written in C with GLFW, OpenGL and
-Cyclone DDS. Each room supports **2â€“5 players** and one server can run up to
+Cyclone DDS. Each room supports **2-5 players** and one server can run up to
 **8 rooms**.
 
 ![Coin Rush main menu](docs/screenshots/menu.png)
@@ -61,7 +61,7 @@ Players on another computer need a one-time invite from the host; see
 | Toggle fullscreen | **F11** |
 | Open the exit confirmation | **Escape** during a match |
 | Mute/unmute | Click the **speaker icon** |
-| Adjust audio volume | Click **âˆ’ / +** or the volume bars |
+| Adjust audio volume | Click **- / +** or the volume bars |
 
 Each level and the bonus round have their own music track. Coin pickups and
 bomb hits play sound effects. Volume controls use a separate tick, whose level
@@ -142,7 +142,7 @@ New-NetFirewallHyperVRule -Name "CoinRushDDS" -DisplayName "Coin Rush DDS" `
   -Action Allow
 ```
 
-The normal game configuration uses DDS participant indices 0â€“15. The rule is
+The normal game configuration uses DDS participant indices 0-15. The rule is
 restricted to its discovery ports and the specified subnet.
 
 ## Testing
