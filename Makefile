@@ -12,7 +12,7 @@ DDS_LIBS = $(CYCLONE_LIBS) -pthread $(OPENSSL_LIBS)
 EFFECT_ASSETS = assets/effects/bomb_spritesheet.rgba assets/effects/plus_spritesheet.rgba assets/effects/colored_hearts.rgba
 SANFLAGS = -std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all server client clean check-deps credentials run run-player2 test qa test-sanitize profile wire loss
+.PHONY: all server client clean check-deps credentials invite run run-player2 test qa test-sanitize profile wire loss
 
 # `make` prepares a runnable local build. `make run` also starts a local server
 # and opens the first client; use separate build/server and build/client
@@ -85,6 +85,10 @@ credentials: security.sh
 	    fi; \
 	    bash security.sh credentials-private; \
 	fi
+
+invite: credentials
+	@command -v gpg >/dev/null 2>&1 || { echo 'Install GnuPG first: sudo apt install gnupg' >&2; exit 1; }
+	bash make-invite.sh "$(PLAYER)"
 
 run: all
 	@./server & server_pid=$$!; \

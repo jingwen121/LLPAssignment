@@ -2,6 +2,7 @@
 #include "network.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/random.h>
@@ -106,6 +107,25 @@ bool net_participant(Network *net, bool server, const char *credentials)
          subject[6] < '1' || subject[6] > '6'))
         return false;
     net->identity = server ? 0 : subject[6] - '1';
+
+    // WSL/LAN deployments need predictable Cyclone DDS discovery ports so a
+    // narrowly scoped UDP firewall rule can allow the game. Auto keeps
+    // multiple local processes (server + several clients) on distinct ports.
+    // Respect an explicit operator configuration if one was supplied.
+    if (!getenv("CYCLONEDDS_URI"))
+    {
+        static const char dds_config[] =
+            "<CycloneDDS><Domain><Discovery>"
+            "<ParticipantIndex>auto</ParticipantIndex>"
+            "<MaxAutoParticipantIndex>15</MaxAutoParticipantIndex>"
+            "</Discovery></Domain></CycloneDDS>";
+        if (setenv("CYCLONEDDS_URI", dds_config, 0) != 0)
+        {
+            fprintf(stderr, "Could not set Cyclone DDS discovery configuration: %s\n",
+                    strerror(errno));
+            return false;
+        }
+    }
 
     dds_qos_t *qos = dds_create_qos();
     if (!qos)

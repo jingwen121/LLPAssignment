@@ -1056,33 +1056,74 @@ static void *dds_worker(void *credentials)
 
 static int default_identity_lock = -1;
 
+static bool acquire_identity_lock(int identity)
+{
+#if defined(__linux__)
+    char lock_path[128];
+    const unsigned long uid = (unsigned long)getuid();
+    snprintf(lock_path, sizeof(lock_path), "/tmp/coin-rush-%lu-client%d.lock", uid, identity);
+    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0)
+        return false;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0)
+    {
+        close(fd);
+        return false;
+    }
+    default_identity_lock = fd;
+#else
+    (void)identity;
+#endif
+    return true;
+}
+
 /* A local advisory lock gives bare `./client` launches a distinct signed
- * identity in this WSL install. The key/certificate remains the DDS identity;
- * the lock only prevents two local processes from selecting the same one. */
+ * identity in this WSL install. An imported invite overrides the local default
+ * so clients on other computers can use their host-issued certificate. */
 static const char *select_default_credentials(void)
 {
 #if defined(__linux__)
-    static char selected[128];
-    char lock_path[128];
-    const unsigned long uid = (unsigned long)getuid();
+    static char selected[160];
+    FILE *preference = fopen("credentials-invites/default-player", "r");
+    if (preference)
+    {
+        int identity = 0;
+        bool valid = fscanf(preference, "%d", &identity) == 1 && identity >= 2 && identity <= 6;
+        fclose(preference);
+        if (!valid)
+        {
+            fprintf(stderr, "Invalid credentials-invites/default-player setting.\n");
+            return NULL;
+        }
+        snprintf(selected, sizeof(selected), "credentials-invites/client%d", identity);
+        char certificate[192];
+        snprintf(certificate, sizeof(certificate), "%s/identity.pem", selected);
+        if (access(certificate, R_OK) != 0)
+        {
+            fprintf(stderr, "Imported player identity client%d is missing; re-import its invite.\n",
+                    identity);
+            return NULL;
+        }
+        if (!acquire_identity_lock(identity))
+        {
+            fprintf(stderr, "Imported player identity client%d is already in use.\n", identity);
+            return NULL;
+        }
+        fprintf(stderr, "Using imported player identity client%d\n", identity);
+        return selected;
+    }
 
     for (int identity = 1; identity <= MAX_PLAYERS; ++identity) {
         snprintf(selected, sizeof(selected), "credentials-private/client%d", identity);
-        char certificate[160];
+        char certificate[192];
         snprintf(certificate, sizeof(certificate), "%s/identity.pem", selected);
         if (access(certificate, R_OK) != 0)
             continue;
 
-        snprintf(lock_path, sizeof(lock_path), "/tmp/coin-rush-%lu-client%d.lock", uid, identity);
-        int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
-        if (fd < 0)
-            continue;
-        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
-            default_identity_lock = fd;
+        if (acquire_identity_lock(identity)) {
             fprintf(stderr, "Using local player identity client%d\n", identity);
             return selected;
         }
-        close(fd);
     }
 
     fprintf(stderr, "No free local player identity is available (maximum %d clients).\n",
@@ -1240,7 +1281,7 @@ int main(int argc, char **argv)
         if (g_screen == UI_CONNECTING && join_failed)
         {
             pthread_mutex_lock(&g_mutex); g_client.join_failed = false; pthread_mutex_unlock(&g_mutex);
-            snprintf(g_ui_error, sizeof(g_ui_error), "Room unavailable, full, or server not running.");
+            snprintf(g_ui_error, sizeof(g_ui_error), "No server reply. Check both PCs' WSL network and firewall.");
             g_screen = create_room ? UI_MAIN_MENU : UI_JOIN_CODE;
         }
 

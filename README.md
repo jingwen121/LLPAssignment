@@ -43,12 +43,68 @@ With no credential argument, each `./client` process takes the first locally
 available signed identity in launch order. An OS file lock prevents two local
 clients from selecting the same identity, and closing a client releases it.
 
-For players on other computers, securely distribute a different signed client
-credential directory to each player. Launch `./build/client <credential-directory>`
-on each remote computer, and start the host with
-`./build/server <server-credential-directory>`. Never copy one private key to
-multiple players. All machines must be able to discover the same Cyclone DDS
-server on the network.
+For a remote player, the host creates a unique encrypted invite. If the host
+uses the default `client1`, run:
+
+```sh
+make invite PLAYER=client2
+```
+
+Send the generated `invites/coinrush-client2.tar.gz.gpg` file over a private
+share and give its passphrase through a separate channel. Make a different
+invite for each friend. Never send `credentials-private/authority` or its CA
+private key.
+
+After extracting the assignment and running `make`, the friend copies the
+invite archive into the project directory and runs:
+
+```sh
+bash join-invite.sh coinrush-client2.tar.gz.gpg
+```
+
+The importer verifies the signed identity and DDS permissions, stores only the
+invited client credential, and starts `./client` with that identity selected.
+The friend then chooses **Join a Room** and enters the room code. Locally
+generated credentials from the friend's own `make` are not used for this host,
+because they are signed by a different authority. All machines still need to
+discover the same Cyclone DDS server on the network.
+
+### Connect between two WSL computers on a LAN
+
+WSL 2 normally uses NAT, which can prevent Cyclone DDS multicast discovery
+from reaching another computer even when both Windows PCs can ping each other.
+On **both** PCs, use Windows 11 22H2 or later and create or edit
+`%UserProfile%\.wslconfig`. Add this under an existing `[wsl2]` section, or
+create that section if the file is new:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then run `wsl --shutdown` in PowerShell on each PC, reopen Ubuntu, and run
+`make` in the project directory on both computers. Restart the host's `./server`
+and clients, then try the room code again. The program sets Cyclone DDS to use
+automatic participant indices (0–15), allowing a local server and clients to
+coexist and making its discovery port range predictable. The normal
+certificate authentication, signed permissions and encrypted DDS traffic
+remain enabled.
+
+If the connection still times out, allow the game's UDP discovery ports in
+the Hyper-V/WSL firewall on both PCs. In an administrator PowerShell window,
+replace `192.168.1.0/24` with your trusted LAN subnet and run:
+
+```powershell
+New-NetFirewallHyperVRule -Name "CoinRushDDS" -DisplayName "Coin Rush DDS" `
+  -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+  -Protocol UDP -LocalPorts 17900-17941 -RemoteAddresses 192.168.1.0/24 `
+  -Action Allow
+```
+
+This rule only permits inbound UDP on the game's configured discovery range
+from the specified LAN subnet. The friend should also confirm that their
+terminal prints `Using imported player identity client2` before starting
+`./client`.
 
 The server supports up to eight rooms with up to five players in each room.
 At least two players start a round. Close a client window to leave its room.
