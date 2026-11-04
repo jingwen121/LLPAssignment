@@ -163,8 +163,11 @@ static void glfw_error_callback(int code, const char *description)
 
 static void apply_music_volume(void)
 {
-    if (g_audio_ready)
-        Mix_VolumeMusic(g_music_muted ? 0 : g_music_volume);
+    if (g_audio_ready) {
+        int volume = g_music_muted || !g_audio_focused ? 0 : g_music_volume;
+        Mix_VolumeMusic(volume * MUSIC_MIX_PERCENT / 100);
+        Mix_Volume(-1, volume);
+    }
 }
 
 static void audio_focus_callback(GLFWwindow *window, int focused)
@@ -181,14 +184,16 @@ static void update_game_music(const GameState *state, bool has_state)
         return;
 
     int track = !has_state || state->phase != 1 ? -1 :
-                (state->level >= 2 ? 1 : 0);
+                (state->level >= 1 && state->level <= 4 ? state->level - 1 : -1);
     if (track == g_music_track)
         return;
 
     Mix_HaltMusic();
     g_music_track = track;
     Mix_Music *music = track == 0 ? g_level_one_music :
-                       track == 1 ? g_level_two_music : NULL;
+                       track == 1 ? g_level_two_music :
+                       track == 2 ? g_level_three_music :
+                       track == 3 ? g_bonus_music : NULL;
     if (music && Mix_PlayMusic(music, -1) != 0)
         fprintf(stderr, "Could not play level music: %s\n", Mix_GetError());
     apply_music_volume();
@@ -211,6 +216,13 @@ static void initialize_audio(void)
     }
 
     g_audio_ready = true;
+    Mix_AllocateChannels(16);
+    Mix_ReserveChannels(1);
+    g_coin_sound = Mix_LoadWAV("assets/sounds/coin.wav");
+    g_bomb_sound = Mix_LoadWAV("assets/sounds/bomb.wav");
+    g_tick_sound = Mix_LoadWAV("assets/sounds/tick.wav");
+    if (g_tick_sound) Mix_VolumeChunk(g_tick_sound, MIX_MAX_VOLUME);
+    if (!g_coin_sound || !g_bomb_sound || !g_tick_sound) fprintf(stderr, "Could not load sound effects: %s\n", Mix_GetError());
     g_level_one_music = Mix_LoadMUS(LEVEL_ONE_MUSIC_PATH);
     if (!g_level_one_music)
         fprintf(stderr, "Could not load Level 1 music (%s): %s\n",
@@ -219,6 +231,10 @@ static void initialize_audio(void)
     if (!g_level_two_music)
         fprintf(stderr, "Could not load Level 2 music (%s): %s\n",
                 LEVEL_TWO_MUSIC_PATH, Mix_GetError());
+    g_level_three_music = Mix_LoadMUS(LEVEL_THREE_MUSIC_PATH);
+    if (!g_level_three_music) fprintf(stderr, "Could not load Level 3 music: %s\n", Mix_GetError());
+    g_bonus_music = Mix_LoadMUS(BONUS_MUSIC_PATH);
+    if (!g_bonus_music) fprintf(stderr, "Could not load bonus music: %s\n", Mix_GetError());
     apply_music_volume();
 }
 

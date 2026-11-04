@@ -85,6 +85,7 @@ def prepare():
 
 def checks():
     run(["./build/test_game"], "game-tests.log")
+    run(["./build/test_client"], "client-tests.log")
     # Exercise generation on a fresh path as well as reusing earlier QA keys
     # A path with spaces catches shell-quoting mistakes before a teammate hits one
     with tempfile.TemporaryDirectory(prefix="issuance-", dir=WORK) as temporary:
@@ -366,6 +367,7 @@ def main():
         env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
                    UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
         run(["./build/test_game_sanitized"], "game-sanitizers.log", env=env)
+        run(["./build/test_client_sanitized"], "client-sanitizers.log", env=env)
         run(["./build/test_sanitized", TRUSTED], "sanitizers.log", env=env)
         # Also exercise the actual threaded server adapter; the protocol fixture
         # alone cannot find memory errors in its main/worker handoff or shutdown

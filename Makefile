@@ -110,7 +110,7 @@ build/messages.c build/messages.h &: protocol/messages.idl | build
 build/server: src/server.c src/game.c include/game.h src/network.c include/network.h build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(CFLAGS) src/server.c src/game.c src/network.c build/messages.c -o $@ $(DDS_LIBS)
 
-build/client: src/client.c src/network.c include/network.h vendor/stb_easy_font.h $(EFFECT_ASSETS) assets/music/level1.mp3 assets/music/level2.mp3 build/messages.c build/messages.h
+build/client: src/client.c src/network.c include/network.h vendor/stb_easy_font.h assets/sounds/coin.wav assets/sounds/bomb.wav assets/sounds/tick.wav $(EFFECT_ASSETS) assets/music/level1.mp3 assets/music/level2.mp3 assets/music/level3.mp3 assets/music/bonus.mp3 build/messages.c build/messages.h
 	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(SDL_MIXER_CFLAGS) $(CFLAGS) src/client.c src/network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) $(SDL_MIXER_LIBS) -lGL -lm
 
 build/test_validation: tests/test_validation.c src/network.c include/network.h build/messages.c build/messages.h
@@ -119,12 +119,16 @@ build/test_validation: tests/test_validation.c src/network.c include/network.h b
 build/test_game: tests/test_game.c src/game.c include/game.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_game.c src/game.c -o $@
 
-test: build/test_validation build/test_game
+build/test_client: tests/test_client.c src/client.c src/network.c include/network.h vendor/stb_easy_font.h assets/sounds/coin.wav assets/sounds/bomb.wav assets/sounds/tick.wav build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(SDL_MIXER_CFLAGS) $(CFLAGS) tests/test_client.c src/network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) $(SDL_MIXER_LIBS) -lGL -lm
+
+test: build/test_validation build/test_game build/test_client
 	./build/test_game
+	./build/test_client
 	./build/test_validation credentials-private
 
 # Run security and networking checks
-qa: all build/test_game build/test_validation
+qa: all build/test_game build/test_validation build/test_client
 	python3 tests/qa.py check
 
 # Compile the same process-based tests with runtime memory and UB checks
@@ -137,7 +141,10 @@ build/server_sanitized: src/server.c src/game.c include/game.h src/network.c inc
 build/test_game_sanitized: tests/test_game.c src/game.c include/game.h | build
 	$(CC) $(CPPFLAGS) $(SANFLAGS) tests/test_game.c src/game.c -o $@
 
-test-sanitize: build/test_sanitized build/server_sanitized build/test_game_sanitized
+build/test_client_sanitized: tests/test_client.c src/client.c src/network.c include/network.h vendor/stb_easy_font.h assets/sounds/coin.wav assets/sounds/bomb.wav assets/sounds/tick.wav build/messages.c build/messages.h
+	$(CC) $(CPPFLAGS) $(CYCLONE_CFLAGS) $(GLFW_CFLAGS) $(SDL_MIXER_CFLAGS) $(SANFLAGS) tests/test_client.c src/network.c build/messages.c -o $@ $(DDS_LIBS) $(GLFW_LIBS) $(SDL_MIXER_LIBS) -lGL -lm
+
+test-sanitize: build/test_sanitized build/server_sanitized build/test_game_sanitized build/test_client_sanitized
 	python3 tests/qa.py sanitize
 
 profile: all
