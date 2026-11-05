@@ -31,6 +31,10 @@
 #define ARENA_W 800
 #define ARENA_H 600
 #define HUD_H 76
+#define LOBBY_BACK_X 12
+#define LOBBY_BACK_Y (HUD_H + 12)
+#define LOBBY_BACK_W 100
+#define LOBBY_BACK_H 32
 #define PLAYER_W 50
 #define PLAYER_H 50
 #define MAX_PLAYERS 5
@@ -79,6 +83,8 @@ typedef struct
     char direction;
     bool running;
     bool join_requested;
+    bool leave_requested;
+    bool leaving_room;
     bool continue_requested;
     bool create_room;
     bool join_failed;
@@ -831,6 +837,7 @@ static const char *phase_name(int phase)
 }
 
 static void draw_button(float x, float y, float w, float h, const char *label, bool hovered);
+static bool point_in_rect(double x, double y, float rx, float ry, float rw, float rh);
 static void draw_sound_controls(void);
 
 static float playfield_panel_top(float height)
@@ -878,7 +885,8 @@ static void draw_ready_button(const GameState *state, int player_id, float y, co
 
 static void draw_arena(const GameState *state, bool has_state, int player_id,
                        uint32_t room_code, const int facing[MAX_PLAYERS],
-                       GLuint cat_east, GLuint cat_west, double now)
+                       GLuint cat_east, GLuint cat_west, double now,
+                       double mouse_x, double mouse_y)
 {
     glClearColor(0.035f, 0.055f, 0.095f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -891,6 +899,11 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     for (int y = HUD_H + 20; y < ARENA_H; y += 40)
     { glVertex2f(0, (float)y); glVertex2f((float)ARENA_W, (float)y); }
     glEnd();
+    bool lobby = has_state && state->phase == 0;
+    if (lobby)
+        draw_button(LOBBY_BACK_X, LOBBY_BACK_Y, LOBBY_BACK_W, LOBBY_BACK_H, "< BACK",
+                    point_in_rect(mouse_x, mouse_y, LOBBY_BACK_X, LOBBY_BACK_Y,
+                                  LOBBY_BACK_W, LOBBY_BACK_H));
     glColor3f(0.43f, 0.88f, 0.92f); draw_text(24, 20, 2.1f, "COIN RUSH");
     char room_label[32];
     snprintf(room_label, sizeof(room_label), "ROOM  %06u", room_code);
@@ -1338,6 +1351,26 @@ static void mouse_button_callback(GLFWwindow *window, int button, int action, in
     g_mouse_clicked = true;
 }
 
+static bool leave_lobby(void)
+{
+    pthread_mutex_lock(&g_mutex);
+    bool is_lobby = g_client.has_state && g_client.state.phase == 0;
+    if (is_lobby && !g_client.leaving_room)
+    {
+        g_client.leave_requested = true;
+        g_client.leaving_room = true;
+        g_client.direction = 'n';
+        g_client.continue_requested = false;
+    }
+    pthread_mutex_unlock(&g_mutex);
+    if (is_lobby)
+    {
+        g_ui_error[0] = '\0';
+        g_screen = UI_MAIN_MENU;
+    }
+    return is_lobby;
+}
+
 static void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
     (void)window; (void)scancode;
@@ -1346,7 +1379,10 @@ static void key_callback(GLFWwindow *window, int key, int scancode, int action, 
     if (key == GLFW_KEY_F11)
     { toggle_fullscreen(window); return; }
     if (key == GLFW_KEY_ESCAPE && g_screen == UI_GAME)
-    { g_exit_from_game = true; g_screen = UI_EXIT_CONFIRM; return; }
+    {
+        if (leave_lobby()) return;
+        g_exit_from_game = true; g_screen = UI_EXIT_CONFIRM; return;
+    }
     if (g_screen == UI_GAME && (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER))
     {
         pthread_mutex_lock(&g_mutex);
@@ -1402,6 +1438,7 @@ static void *dds_worker(void *credentials)
         // not hold the mutex needed by rendering or keyboard callbacks
         pthread_mutex_lock(&g_mutex);
         bool running = g_client.running, join_requested = g_client.join_requested;
+        bool leave_requested = g_client.leave_requested;
         bool continue_requested = g_client.continue_requested;
         bool create_room = g_client.create_room;
         char direction = g_client.direction;
@@ -1411,6 +1448,34 @@ static void *dds_worker(void *credentials)
         memcpy(display_name, g_client.display_name, sizeof(display_name));
         pthread_mutex_unlock(&g_mutex);
         if (!running) break;
+
+        if (leave_requested)
+        {
+            /* net_close sends a token/session-bound leave and waits for the
+             * server acknowledgement. Reopen DDS afterward so this client can
+             * return to the menu and join another room without restarting. */
+            net_close(&net);
+            if (!net_open(&net, false, credentials))
+            {
+                pthread_mutex_lock(&g_mutex);
+                g_client.network_failed = true;
+                g_client.leave_requested = false;
+                g_client.leaving_room = false;
+                pthread_mutex_unlock(&g_mutex);
+                break;
+            }
+            active_token = 0;
+            pthread_mutex_lock(&g_mutex);
+            g_client.leave_requested = false;
+            g_client.leaving_room = false;
+            g_client.join_requested = false;
+            g_client.continue_requested = false;
+            g_client.player_id = 0;
+            g_client.has_state = false;
+            g_client.join_failed = false;
+            pthread_mutex_unlock(&g_mutex);
+            continue;
+        }
 
         if (join_requested && token != active_token)
         {
@@ -1633,7 +1698,11 @@ int main(int argc, char **argv)
         bool clicked = g_mouse_clicked; g_mouse_clicked = false;
         if (clicked) { mx = g_click_x; my = g_click_y; }
 
-        if (g_screen == UI_MAIN_MENU && clicked)
+        pthread_mutex_lock(&g_mutex);
+        bool leaving_room = g_client.leaving_room;
+        pthread_mutex_unlock(&g_mutex);
+
+        if (g_screen == UI_MAIN_MENU && clicked && !leaving_room)
         {
             g_name_selected = false;
             g_name_focused = point_in_rect(mx, my, 290, menu_origin_y() + 90, 220, 40);
@@ -1664,7 +1733,10 @@ int main(int argc, char **argv)
         }
         else if (g_screen == UI_GAME && clicked)
         {
-            if (handle_sound_click(mx, my)) { /* handled by audio controls */ }
+            if (point_in_rect(mx, my, LOBBY_BACK_X, LOBBY_BACK_Y,
+                              LOBBY_BACK_W, LOBBY_BACK_H) && leave_lobby())
+            { /* Returned to the menu from the lobby. */ }
+            else if (handle_sound_click(mx, my)) { /* handled by audio controls */ }
             else
             {
                 pthread_mutex_lock(&g_mutex);
@@ -1727,7 +1799,7 @@ int main(int argc, char **argv)
         else if (g_screen == UI_CONNECTING) draw_connecting(room_code, create_room);
         else if (g_screen == UI_EXIT_CONFIRM) draw_exit_confirm(mx, my);
         else draw_arena(&state, has_state, player_id, room_code, facing,
-                        cat_east, cat_west, frame_time);
+                        cat_east, cat_west, frame_time, mx, my);
         glfwSwapBuffers(window);
     }
 
