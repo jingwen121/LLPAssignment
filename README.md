@@ -60,12 +60,14 @@ In **PowerShell**, list installed distributions:
 wsl --list --verbose
 ```
 
-`VERSION 2` in this list means WSL 2, not the Cyclone DDS release. Select a
-distribution by its exact registered name. For example, check an installed
-`Ubuntu-26.04` with:
+`VERSION 2` means WSL 2, not the Ubuntu or Cyclone DDS release. At the launcher
+prompt, copy the distribution name from the **NAME** column exactly. If it shows
+`Ubuntu`, enter **`Ubuntu` only**; do not append a release number or type
+`Ubuntu 26.04`. Include a version suffix only if it is part of the listed name.
+For a distribution listed as `Ubuntu`, check DDS with:
 
 ```powershell
-wsl -d Ubuntu-26.04 -- bash -lc "pkg-config --modversion CycloneDDS"
+wsl -d Ubuntu -- bash -lc "pkg-config --modversion CycloneDDS"
 ```
 
 If WSL or the desired distribution is missing, use `wsl --list --online` to see
@@ -85,8 +87,9 @@ chosen release or guarantee compatibility with every future version.
 
 1. On the host computer, double-click **`server.bat`** and keep its window open.
 2. Open **`client.bat`** on the host and each player's computer.
-3. When prompted for a WSL distribution, enter its installed name, such as `Ubuntu`.
-   The launcher remembers the choice.
+3. When prompted for a WSL distribution, enter its exact registered name.
+   If the list shows `Ubuntu`, type **`Ubuntu` only**, without adding a release
+   number. The launcher remembers the choice.
 4. Enter your display name. One player chooses **Create Room** and shares the
    six-digit room code; everyone else chooses **Join a Room**.
 5. Every player presses **Ready** or **Enter**. The match starts once at least
@@ -105,10 +108,10 @@ To choose a distro explicitly, run these from the project folder in **PowerShell
 
 | Task | Command (replace the example distro name) |
 | --- | --- |
-| Host the server | `.\server.bat Ubuntu-26.04` |
-| Open a client | `.\client.bat Ubuntu-26.04` |
-| Create one encrypted invite on the host | `.\create-invite.bat client2 Ubuntu-26.04` |
-| Create a complete per-player zip on the host | `.\package-friend.bat client2 Ubuntu-26.04` |
+| Host the server | `.\server.bat Ubuntu` |
+| Open a client | `.\client.bat Ubuntu` |
+| Create one encrypted invite on the host | `.\create-invite.bat client2 Ubuntu` |
+| Create a complete per-player zip on the host | `.\package-friend.bat client2 Ubuntu` |
 
 ## How a match works
 
@@ -238,7 +241,7 @@ You can also select both identity and distro from **PowerShell**:
 
 ```powershell
 cd C:\LLP\LLPAssignment
-.\package-friend.bat client2 Ubuntu-26.04
+.\package-friend.bat client2 Ubuntu
 Get-ChildItem .\packages\*.zip
 ```
 
@@ -256,7 +259,9 @@ host folder by hand: it may contain authority and server private keys.
 
 1. Extract the zip fully, then open its inner `CoinRush-clientN` folder.
 2. Set up WSL 2/WSLg and a distro with a supported DDS release as described above.
-3. Double-click `client.bat`. Choose that distro if asked; allow dependency
+3. Double-click `client.bat`. If asked for the distro, copy its exact name from
+   `wsl --list --verbose`. A name listed as `Ubuntu` must be entered as
+   **`Ubuntu` only**, not `Ubuntu` followed by a version number. Allow dependency
    installation and enter your own Linux `sudo` password if prompted.
 4. On the first launch, enter the **invite passphrase** from the host. This is
    separate from your Linux password. The helper verifies and imports the invite.
@@ -455,10 +460,10 @@ name is already installed, use the latest launcher and pass its name explicitly:
 ```powershell
 cd C:\LLP\LLPAssignment
 wsl --list --verbose
-wsl -d Ubuntu-26.04 -- bash -lc "pkg-config --modversion CycloneDDS"
-.\server.bat Ubuntu-26.04
+wsl -d Ubuntu -- bash -lc "pkg-config --modversion CycloneDDS"
+.\server.bat Ubuntu
 # In another PowerShell window:
-.\client.bat Ubuntu-26.04
+.\client.bat Ubuntu
 ```
 
 If the direct `wsl -d ...` command succeeds but the batch launch fails, check
@@ -467,7 +472,7 @@ earlier launcher had a distro-argument problem; reinstalling the already working
 distro is unnecessary. You can bypass the Windows wrapper from the project root:
 
 ```powershell
-wsl --distribution Ubuntu-26.04 --exec bash scripts/run-game-wsl.sh server
+wsl --distribution Ubuntu --exec bash scripts/run-game-wsl.sh server
 # Use 'client' instead of 'server' for the client.
 ```
 
@@ -480,7 +485,7 @@ Run it from an existing PowerShell window to retain the error output:
 
 ```powershell
 cd C:\LLP\LLPAssignment
-.\server.bat Ubuntu-26.04
+.\server.bat Ubuntu
 ```
 
 The server should stay running with `Coin Rush room server ready ...`; it does
