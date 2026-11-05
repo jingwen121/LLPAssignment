@@ -527,16 +527,19 @@ bool net_client_send(Network *net, char direction)
     if (net->player_id == 0)
         return true;
 
-    // Send idle heartbeats every 100 ms and movement no faster than every 10 ms
+    // Send direction changes immediately; repeat held input every 10 ms.
     int64_t interval = direction == 'n' ? INT64_C(100000000) : NET_INPUT_NS;
-    if (direction != 'q' && now - net->last_input < interval)
+    if (direction != 'q' && direction == net->last_direction &&
+        now - net->last_input < interval)
         return true;
 
     Input input = {.room_code = net->room_code, .int_player_id = net->player_id,
         .ch_direction = direction, .leave_room = direction == 'q',
         .seq = ++net->seq, .session_id = net->session_id};
     net->last_input = now;
-    return checked(dds_write(net->input, &input), "Send input");
+    bool sent = checked(dds_write(net->input, &input), "Send input");
+    if (sent) net->last_direction = direction;
+    return sent;
 }
 
 static bool valid_state(const GameState *state)

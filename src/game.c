@@ -119,11 +119,8 @@ static void move_players(Game *g, uint64_t now_ms)
         if (g->level == 4 && !(g->contenders & (1u << i)))
             continue;
 
-        /* The client sends an input about every 10 ms WHILE a key is held,
-         * and sends nothing when it is released (there is no "released"
-         * message). So if the last input is older than INPUT_TIMEOUT_MS
-         * (60 ms), we treat the key as released and the player stops.
-         * Without this, players would keep sliding after letting go. */
+        /* Releases stop immediately; the timeout covers a stalled or lost client
+         * while tolerating short gaps between held-input updates on Wi-Fi. */
         int dir = (now_ms - p->last_input_ms <= INPUT_TIMEOUT_MS) ? p->dir : 0;
         if (dir == 0)
             continue;

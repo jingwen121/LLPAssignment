@@ -16,7 +16,7 @@
 #define PLAYER_H         50
 #define PLAYER_Y         (HEIGHT - PLAYER_H - 10) /* players live on the bottom row */
 #define PLAYER_SPEED     6   /* pixels per tick */
-#define INPUT_TIMEOUT_MS 60  /* no input for this long = key released */
+#define INPUT_TIMEOUT_MS 250 /* stop if held-input updates stop arriving */
 
 /* ---------- Coins ---------- */
 #define MAX_COINS        8

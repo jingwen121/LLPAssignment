@@ -219,6 +219,22 @@ int main(void)
     /* Reused slots and new matches never inherit an old ready vote. */
     assert(game_add_player(&g) == 3 && g.ready_players == 0);
     assert(!game_continue_level(&g, 3, t));
+    Game movement;
+    game_init(&movement);game_add_player(&movement);
+    uint64_t input_at=1000;
+    int start_x=movement.players[0].x;
+    assert(game_set_input(&movement,1,1,input_at));
+    game_tick(&movement,input_at+100);
+    assert(movement.players[0].x==start_x+PLAYER_SPEED);
+    game_tick(&movement,input_at+200);
+    assert(movement.players[0].x==start_x+2*PLAYER_SPEED);
+    assert(game_set_input(&movement,1,0,input_at+201));
+    game_tick(&movement,input_at+202);
+    assert(movement.players[0].x==start_x+2*PLAYER_SPEED);
+    assert(game_set_input(&movement,1,1,input_at+300));
+    game_tick(&movement,input_at+300+INPUT_TIMEOUT_MS+1);
+    assert(movement.players[0].x==start_x+2*PLAYER_SPEED);
+    puts("PASS held movement survives 200 ms jitter, releases immediately and times out safely");
     puts("ALL TESTS PASSED");
     return 0;
 }

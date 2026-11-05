@@ -94,6 +94,7 @@ typedef struct
     uint64_t state_sequence;
     int64_t last_join;
     int64_t last_input;
+    char last_direction;
     int64_t last_state;
 
     // Diagnostic counters for QA; server received counts raw inputs, while client
