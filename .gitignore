@@ -13,5 +13,6 @@
 /credentials-private/
 /credentials-invites/
 /invites/
+/packages/
 
 __pycache__/

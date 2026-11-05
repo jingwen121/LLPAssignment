@@ -101,7 +101,13 @@ still apply.
 ## Set up another computer
 
 Each remote player needs a distinct credential signed by the host's authority.
-Do this once per player:
+On the host, after the first `server.bat` setup, run `package-friend.bat`
+and choose an unused identity from `client2` through `client6`. Enter the invite
+passphrase twice when prompted. The script creates a zip in `packages/` with
+the game source, assets, and only that player's encrypted invite. Share the
+passphrase separately from the zip. Never include `credentials-private/`.
+
+The manual per-player flow is:
 
 1. Start `server.bat` on the host to complete its initial setup.
 2. On the host, run **`create-invite.bat`** and select an unused identity from
