@@ -112,6 +112,7 @@ static void fill_game_state(GameState *out, const Room *room)
         out->player_score[i] = game->players[i].score;
         out->bonus_score[i] = game->bonus_score[i];
         out->player_lives[i] = game->players[i].lives;
+        out->player_bomb_hits[i] = game->players[i].bomb_hits;
         out->player_collect_seq[i] = game->players[i].collect_seq;
         out->player_bomb_seq[i] = game->players[i].bomb_seq;
     }

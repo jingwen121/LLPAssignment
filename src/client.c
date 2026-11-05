@@ -142,6 +142,15 @@ static GLuint g_bomb_texture;
 static GLuint g_plus_texture;
 static GLuint g_heart_texture;
 static PickupEffect g_pickup_effects[MAX_PLAYERS];
+typedef struct
+{
+    bool tracked, active, lost;
+    int level, lives, heart;
+    uint32_t sequence;
+    double started;
+} HeartEffect;
+static HeartEffect g_heart_effects[MAX_PLAYERS];
+
 static Mix_Music *g_level_one_music;
 static Mix_Music *g_level_two_music;
 static Mix_Music *g_level_three_music;
@@ -502,8 +511,87 @@ static void draw_bomb(const GameState *state, int i, double now)
                      (float)state->bomb_y[i] - 4.0f, 32.0f, false);
 }
 
+static int heart_frame(const GameState *state, int player, int heart)
+{
+    return state->level == 3 && heart == state->player_lives[player] - 1 ?
+        state->player_bomb_hits[player] * 2 : 0;
+}
+
+static void observe_lives(const GameState *state, double now)
+{
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+    {
+        HeartEffect *effect = &g_heart_effects[i];
+        if (!state->player_active[i] || (state->phase != 1 && state->phase != 2 && state->phase != 3) ||
+            state->level < 2 || state->level > 3) {
+            effect->tracked = effect->active = false;
+            continue;
+        }
+        if (!effect->tracked || effect->level != state->level) {
+            *effect = (HeartEffect){.tracked = true, .level = state->level,
+                .lives = state->player_lives[i], .sequence = state->player_bomb_seq[i]};
+            continue;
+        }
+        if (now - effect->started >= 0.45) effect->active = false;
+        if (effect->sequence != state->player_bomb_seq[i]) {
+            effect->sequence = state->player_bomb_seq[i];
+            effect->lost = state->player_lives[i] < effect->lives;
+            effect->heart = effect->lost ? effect->lives - 1 : state->player_lives[i] - 1;
+            effect->active = effect->heart >= 0;
+            effect->started = now;
+        }
+        effect->lives = state->player_lives[i];
+    }
+}
+
+static void draw_heart(int frame, float x, float y, float alpha)
+{
+    if (!g_heart_texture) {
+        glColor4f(1, 0.24f, 0.35f, alpha);
+        draw_rect(x, y + 2, 12, 10);
+        return;
+    }
+    /* Heart cells are 14 by 12 pixels, not 16 by 16. */
+    float u0 = frame * 14.0f / HEART_SHEET_WIDTH;
+    float u1 = (frame + 1) * 14.0f / HEART_SHEET_WIDTH;
+    float v = 12.0f / HEART_SHEET_HEIGHT;
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, g_heart_texture);
+    glColor4f(1, 1, 1, alpha);
+    glBegin(GL_QUADS);
+    glTexCoord2f(u0, 0); glVertex2f(x, y);
+    glTexCoord2f(u1, 0); glVertex2f(x + 14, y);
+    glTexCoord2f(u1, v); glVertex2f(x + 14, y + 12);
+    glTexCoord2f(u0, v); glVertex2f(x, y + 12);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+}
+
+static void draw_lives(const GameState *state, int i, double now)
+{
+    float x = (float)state->player_x[i] + PLAYER_W * 0.5f - 25;
+    float y = (float)state->player_y[i] - 40;
+    HeartEffect *effect = &g_heart_effects[i];
+    double elapsed = now - effect->started;
+    bool animating = effect->active && elapsed >= 0 && elapsed < 0.45;
+    if (state->player_lives[i] <= 0 && !animating) {
+        glColor3f(1.0f, 0.48f, 0.52f);
+        draw_centered((float)state->player_x[i] + PLAYER_W * 0.5f, y + 1, 1, "OUT");
+    }
+    for (int heart = 0; heart < state->player_lives[i]; ++heart) {
+        float offset = animating && !effect->lost && heart == effect->heart ?
+            sinf((float)elapsed * 42) * 2 : 0;
+        draw_heart(heart_frame(state, i, heart), x + heart * 17 + offset, y, 1);
+    }
+    if (animating && effect->lost)
+        draw_heart(6, x + effect->heart * 17, y,
+                   1 - (float)elapsed / 0.45f);
+}
+
 static void observe_coin_collects(const GameState *state, double now)
 {
+    observe_lives(state, now);
     for (int i = 0; i < MAX_PLAYERS; ++i)
     {
         PickupEffect *effect = &g_pickup_effects[i];
@@ -712,7 +800,8 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
         return;
     int x = state->player_x[i], y = state->player_y[i];
     const float eliminated_tint[3] = {0.30f, 0.32f, 0.38f};
-    const float *tint = state->level == 4 && !(state->contenders & (1 << i)) ? eliminated_tint : tints[i];
+    const float *tint = state->player_lives[i] <= 0 ||
+        (state->level == 4 && !(state->contenders & (1 << i))) ? eliminated_tint : tints[i];
     GLuint sprite = facing < 0 ? cat_west : cat_east;
     if (sprite)
         draw_cat(sprite, (float)x - 7.0f, (float)y - 28.0f, tint);
@@ -725,7 +814,7 @@ static void draw_player(const GameState *state, int i, int my_id, int facing,
         draw_centered((float)x + 25.0f, (float)y + 20.0f, 0.8f, label);
     }
     glColor3f(tint[0], tint[1], tint[2]);
-    draw_centered(fmaxf(65, fminf(735, (float)x + 25)), (float)y - 48, 1.0f, player_name(state, i));
+    draw_centered(fmaxf(65, fminf(735, (float)x + 25)), (float)y - 52, 1.0f, player_name(state, i));
     if (my_id == i + 1)
     {
         glColor3f(0.68f, 0.91f, 1.0f);
@@ -849,6 +938,11 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
     for (int i = 0; i < MAX_PLAYERS; ++i)
     {
         draw_player(state, i, player_id, facing[i], cat_east, cat_west);
+        bool fading = g_heart_effects[i].active && g_heart_effects[i].lost &&
+            now - g_heart_effects[i].started >= 0 && now - g_heart_effects[i].started < 0.45;
+        if (state->player_active[i] && (state->phase == 1 || fading) &&
+            state->level >= 2 && state->level <= 3)
+            draw_lives(state, i, now);
 
     }
     if (state->phase == 1)
@@ -893,7 +987,7 @@ static void draw_arena(const GameState *state, bool has_state, int player_id,
         glColor3f(0.88f, 0.93f, 1.0f);
         draw_centered(ARENA_W * 0.5f, top + 80, 1.25f, "Your score carries into the next level");
         glColor3f(1.0f, 0.83f, 0.42f);
-        draw_centered(ARENA_W * 0.5f, top + 114, 1.2f, state->level == 1 ? "Bombs cost 3 points. Everyone keeps playing!" : "Watch the red floor: bomb bursts are coming!");
+        draw_centered(ARENA_W * 0.5f, top + 114, 1.2f, state->level == 1 ? "Bombs cost 1 life. Zero lives means OUT." : "3 bomb hits cost 1 life. Watch the red floor!");
         snprintf(text, sizeof(text), "CONTINUE TO LEVEL %d", state->level + 1);
         draw_ready_button(state, player_id, ready_button_y(state), text);
         glColor3f(0.57f, 0.68f, 0.81f);

@@ -557,7 +557,8 @@ static bool valid_state(const GameState *state)
     for (int i = 0; i < NET_PLAYERS; ++i)
         if (state->player_x[i] < 0 || state->player_x[i] > 750 ||
             state->player_y[i] < 0 || state->player_y[i] > 550 || state->player_score[i] < 0 ||
-            state->player_lives[i] < 0 || state->player_lives[i] > 3)
+            state->player_lives[i] < 0 || state->player_lives[i] > 3 ||
+            state->player_bomb_hits[i] < 0 || state->player_bomb_hits[i] > 2)
             return false;
 
     for (int i = 0; i < NET_PLAYERS; ++i)

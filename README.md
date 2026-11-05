@@ -37,11 +37,11 @@ Players on another computer need a one-time invite from the host; see
 | Stage | Duration | What changes |
 | --- | --- | --- |
 | Level 1 | 30 seconds | Catch normal coins for **1 point** and gold coins for **3 points**. |
-| Level 2 | 30 seconds | Coins fall faster and bombs appear. Each bomb hit deducts **3 points**. |
-| Level 3 | 30 seconds | Red floor warnings precede bomb bursts, with gold coins tempting players into danger zones. Warnings become more frequent near the end. |
+| Level 2 | 30 seconds | Coins fall faster and bombs appear. Players start each level with **3 lives**; each bomb hit removes **1 life** without deducting points. |
+| Level 3 | 30 seconds | Red floor warnings precede bomb bursts, with gold coins tempting players into danger zones. Warnings become more frequent near the end; **3 bomb hits** remove **1 life** without deducting points. The current heart shows increasing damage after the first two hits; a lost heart breaks and fades. |
 | Tie-breaker | 15 seconds | Tied leaders compete in a coin-only round while other players spectate. Another tie repeats the bonus round among its tied leaders. |
 
-- Scores carry across the three levels. Bomb penalties stop at zero; nobody is eliminated.
+- Scores carry across the three levels. At zero lives, players stop moving and collecting coins; their saved scores remain eligible to win. A level ends when its timer expires or everyone is out. Level 2 advances to the Level 3 ready screen; Level 3 ends the match. Everyone must confirm before Level 3 starts, with scores retained and lives reset to three.
 - At each level break, everyone must confirm before the next level begins.
   A green checkmark confirms your vote and the ready count shows the room's progress.
 - The final leaderboard ranks players by their total score. Bonus points resolve

@@ -23,6 +23,38 @@ int main(void) {
     character_callback(NULL,'7');assert(strcmp(g_room_code_input,"7")==0 && g_room_code_length==1);
     key_callback(NULL,GLFW_KEY_BACKSPACE,0,GLFW_REPEAT,0);assert(g_room_code_length==0);
     puts("PASS held Backspace, Ctrl+A replacement/delete, and input limits");
+    GameState hearts={0};hearts.phase=1;hearts.level=3;
+    hearts.player_active[0]=true;hearts.player_lives[0]=3;
+    observe_lives(&hearts,0);assert(!g_heart_effects[0].active);
+    for(int hit=1;hit<=3;++hit) {
+        hearts.player_bomb_hits[0]=hit%3;hearts.player_bomb_seq[0]=hit;
+        hearts.player_lives[0]=hit==3?2:3;
+        observe_lives(&hearts,hit);
+        assert(g_heart_effects[0].active && g_heart_effects[0].heart==2);
+        assert(g_heart_effects[0].lost==(hit==3));
+        if(hit<3) assert(heart_frame(&hearts,0,2)==hit*2);
+        assert(heart_frame(&hearts,0,0)==0);
+    }
+    hearts.phase=2;observe_lives(&hearts,4);assert(!g_heart_effects[0].active);
+    hearts.level=2;hearts.phase=1;hearts.player_lives[0]=3;
+    observe_lives(&hearts,5);assert(!g_heart_effects[0].active);
+    assert(heart_frame(&hearts,0,2)==0);
+    ++hearts.player_bomb_seq[0];hearts.player_lives[0]=2;
+    observe_lives(&hearts,6);
+    assert(g_heart_effects[0].active && g_heart_effects[0].lost);
+    assert(g_heart_effects[0].heart==2 && g_heart_effects[0].started==6);
+
+    hearts.player_lives[0]=1;observe_lives(&hearts,7);
+    ++hearts.player_bomb_seq[0];hearts.player_lives[0]=0;hearts.phase=3;
+    observe_lives(&hearts,8);
+    assert(g_heart_effects[0].active && g_heart_effects[0].lost);
+    assert(g_heart_effects[0].heart==0 && g_heart_effects[0].started==8);
+    hearts.phase=1;hearts.player_lives[0]=1;observe_lives(&hearts,9);
+    ++hearts.player_bomb_seq[0];hearts.player_lives[0]=0;hearts.phase=2;
+    observe_lives(&hearts,10);
+    assert(g_heart_effects[0].active && g_heart_effects[0].lost);
+    assert(g_heart_effects[0].heart==0 && g_heart_effects[0].started==10);
+    puts("PASS Level 3 damaged sprites, heart-loss animation and level reset");
     initialize_audio(); assert(g_audio_ready && g_coin_sound && g_bomb_sound && g_tick_sound);
     assert(g_level_one_music && g_level_two_music && g_level_three_music && g_bonus_music);
     GameState state={0};state.phase=1;state.player_active[0]=true;

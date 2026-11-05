@@ -51,7 +51,8 @@ struct GameState
     long player_x[5];
     long player_y[5];
     long player_score[5];
-    long player_lives[5]; // Reserved compatibility field; no elimination
+    long player_lives[5];
+    long player_bomb_hits[5];
     unsigned long player_collect_seq[5];
     unsigned long player_bomb_seq[5];
     boolean coin_active[8];

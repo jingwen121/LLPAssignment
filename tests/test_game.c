@@ -84,39 +84,71 @@ int main(void)
     }
     assert(g.phase == PHASE_RESULTS && g.winners == 1 && g.best_score == 20);
 
-    /* Bombs deduct points, respect cooldown, and never eliminate. */
-    game_init(&g); game_add_player(&g); game_add_player(&g);
+    /* Zero lives restores the original elimination rules without losing points. */
+    game_init(&g);
+    for (int i = 0; i < 4; ++i) game_add_player(&g);
     t += 1000; game_tick(&g, t); ready_all(&g, t);
-    t = g.phase_end_ms; game_tick(&g, t); assert(game_continue_level(&g, 1, t)); assert(g.ready_players == 1);
-            assert(game_continue_level(&g, 1, t)); assert(g.phase == PHASE_LEVEL_BREAK);
-            assert(game_continue_level(&g, 2, t));
+    t = g.phase_end_ms; game_tick(&g, t); ready_all(&g, t);
     for (int c = 0; c < MAX_COINS; ++c) g.coins[c].active = false;
     for (int b = 0; b < MAX_BOMBS; ++b) g.bombs[b].active = false;
     g.players[0].score = 8;
     for (int hit = 0; hit < 5; ++hit) {
         t += BOMB_HIT_COOLDOWN_MS;
-        int before = g.players[0].score;
         g.bombs[0] = (Bomb){true, g.players[0].x, PLAYER_Y, BOMB_SIZE, 0};
         game_tick(&g, t);
-        assert(g.players[0].score == (before > BOMB_PENALTY ? before - BOMB_PENALTY : 0));
-        assert(g.players[0].bomb_seq == (uint32_t)(hit + 1));
-        int after = g.players[0].score;
+        assert(g.players[0].score == 8);
+        assert(g.players[0].lives == (hit < 3 ? 2 - hit : 0));
+        assert(g.players[0].bomb_seq == (uint32_t)(hit < 3 ? hit + 1 : 3));
+        int lives_after = g.players[0].lives;
         g.bombs[0] = (Bomb){true, g.players[0].x, PLAYER_Y, BOMB_SIZE, 0};
-        game_tick(&g, t + 1); assert(g.players[0].score == after);
-        assert(g.players[0].bomb_seq == (uint32_t)(hit + 1));
+        game_tick(&g, t + 1);
+        assert(g.players[0].lives == lives_after);
         g.bombs[0].active = false;
     }
-    assert(g.phase == PHASE_PLAYING && game_num_active(&g) == 2);
+    assert(g.phase == PHASE_PLAYING && game_num_alive(&g) == 3);
     int old_x = g.players[0].x;
     g.coins[0] = (Coin){true, false, old_x, PLAYER_Y, COIN_SIZE, 0, COIN_VALUE};
     assert(game_set_input(&g, 1, 1, t)); game_tick(&g, t + TICK_MS);
-    assert(g.players[0].x > old_x && g.players[0].score == 1);
+    assert(g.players[0].x == old_x && g.players[0].score == 8);
+    Game eliminated = g;
+    eliminated.players[1].lives = eliminated.players[2].lives = 0;
+    eliminated.players[3].score = 1;
+    game_tick(&eliminated, t + 2 * TICK_MS);
+    assert(eliminated.phase == PHASE_PLAYING && eliminated.level == 2);
+    eliminated.players[3].lives = 0;
+    game_tick(&eliminated,t+3*TICK_MS);
+    assert(eliminated.phase == PHASE_LEVEL_BREAK && eliminated.level == 2);
+    assert(eliminated.players[0].score == 8);
+    assert(game_continue_level(&eliminated,1,t+2*TICK_MS));
+    assert(eliminated.phase == PHASE_LEVEL_BREAK);
+    ready_all(&eliminated,t+2*TICK_MS);
+    assert(eliminated.phase == PHASE_PLAYING && eliminated.level == 3);
+    for (int i=0;i<4;++i) assert(eliminated.players[i].lives == 3);
+    assert(eliminated.players[0].score == 8);
+    for (int i=0;i<3;++i) eliminated.players[i].lives=0;
+    game_tick(&eliminated,t+4*TICK_MS);
+    assert(eliminated.phase == PHASE_PLAYING);
+    game_tick(&eliminated,eliminated.phase_end_ms);
+    assert(eliminated.phase == PHASE_RESULTS && eliminated.winners == 1);
+    assert(eliminated.best_score == 8);
+    Game tied = eliminated;
+    tied.phase = PHASE_PLAYING;
+    tied.players[1].score = tied.players[0].score;
+    game_tick(&tied,t+5*TICK_MS);
+    assert(tied.level == 4 && tied.contenders == 3);
+    assert(tied.players[0].lives == 3 && tied.players[1].lives == 3);
+
+    g.coins[0].active = false;
+    g.players[0].lives = 3;
+    game_remove_player(&g, 3); game_remove_player(&g, 4);
 
     /* Level 3 warning lasts 1.5 seconds before a burst; gold remains unique. */
     t = g.phase_end_ms; game_tick(&g, t); assert(game_continue_level(&g, 1, t)); assert(g.ready_players == 1);
             assert(game_continue_level(&g, 1, t)); assert(g.phase == PHASE_LEVEL_BREAK);
             assert(game_continue_level(&g, 2, t));
     assert(g.level == 3);
+    assert(g.players[0].lives == LIVES_PER_PLAYER);
+    assert(g.players[0].score == 8);
     for (int n = 1; n <= 94; ++n) {
         t += TICK_MS; game_tick(&g, t);
         if (n < 94) assert(g.danger_lane == 0);
@@ -127,8 +159,23 @@ int main(void)
     assert(g.danger_lane == -1);
     for (int b = 0; b < MAX_BOMBS; ++b) assert(g.bombs[b].x < 200 && g.bombs[b].y > 0);
 
+    for (int c = 0; c < MAX_COINS; ++c) g.coins[c].active = false;
+    game_add_player(&g);
+    int level_three_score = g.players[0].score;
+    for (int hit = 1; hit <= 10; ++hit) {
+        for (int b = 0; b < MAX_BOMBS; ++b) g.bombs[b].active = false;
+        t += BOMB_HIT_COOLDOWN_MS;
+        g.bombs[0] = (Bomb){true, g.players[0].x, PLAYER_Y, BOMB_SIZE, 0};
+        game_tick(&g, t);
+        assert(g.players[0].lives == (hit < 9 ? 3 - hit / 3 : 0));
+        assert(g.players[0].bomb_hits == (hit < 9 ? hit % 3 : 0));
+        assert(g.players[0].score == level_three_score);
+    }
+    assert(game_num_active(&g) == 3 && game_num_alive(&g) == 2);
+    g.players[0].lives = 3;
+
     /* Only tied leaders enter bonus; totals persist; repeated ties replay. */
-    game_add_player(&g); g.players[0].score = g.players[1].score = 30; g.players[2].score = 3;
+    g.players[0].score = g.players[1].score = 30; g.players[2].score = 3;
     for (int c = 0; c < MAX_COINS; ++c) g.coins[c].active = false;
     for (int b = 0; b < MAX_BOMBS; ++b) g.bombs[b].active = false;
     t = g.phase_end_ms; game_tick(&g, t);

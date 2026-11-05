@@ -114,7 +114,7 @@ static void move_players(Game *g, uint64_t now_ms)
         Player* p = &g->players[i];
 
         // Skip empty slots: nobody has joined with this ID
-        if (!p->active)
+        if (!p->active || p->lives <= 0)
             continue;
         if (g->level == 4 && !(g->contenders & (1u << i)))
             continue;
@@ -208,7 +208,7 @@ static int find_overlapping_player(const Game *g, int object_x, int object_y,
         for (int lane = 0; lane < 4; ++lane)
         {
             const Player *p = &g->players[i + lane];
-            bool ready = p->active && (g->level != 4 || (g->contenders & (1u << (i + lane))));
+            bool ready = p->active && p->lives > 0 && (g->level != 4 || (g->contenders & (1u << (i + lane))));
             if (ready && enforce_bomb_cooldown && p->last_bomb_hit_ms != 0 &&
                 now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS)
                 ready = false;
@@ -258,7 +258,7 @@ static int find_overlapping_player(const Game *g, int object_x, int object_y,
     for (; i < MAX_PLAYERS; ++i)
     {
         const Player *p = &g->players[i];
-        if (!p->active || (g->level == 4 && !(g->contenders & (1u << i))))
+        if (!p->active || p->lives <= 0 || (g->level == 4 && !(g->contenders & (1u << i))))
             continue;
         if (enforce_bomb_cooldown && p->last_bomb_hit_ms != 0 &&
             now_ms - p->last_bomb_hit_ms < BOMB_HIT_COOLDOWN_MS)
@@ -313,11 +313,14 @@ static void check_bomb_hits(Game *g, uint64_t now_ms)
             continue;
 
         Player *p = &g->players[player_index];
-        p->score = p->score > BOMB_PENALTY ? p->score - BOMB_PENALTY : 0;
+        if (++p->bomb_hits >= (g->level == 3 ? 3 : 1)) {
+            p->bomb_hits = 0;
+            if (p->lives > 0) --p->lives;
+        }
         ++p->bomb_seq;
         p->last_bomb_hit_ms = now_ms;
-        printf("%s hit a bomb -> %d points\n",
-               p->name, p->score);
+        printf("%s hit a bomb -> %d lives\n",
+               p->name, p->lives);
         spawn_bomb(g, bomb, false);
     }
 }
@@ -348,6 +351,7 @@ static void start_round(Game *g, uint64_t now_ms)
     {
         g->players[i].lives = LIVES_PER_PLAYER;
         g->players[i].last_bomb_hit_ms = 0;
+        g->players[i].bomb_hits = 0;
     }
     for (int i = 0; i < MAX_BOMBS; ++i)
     {
@@ -376,13 +380,15 @@ static void start_next_level(Game *g, uint64_t now_ms)
             continue;
         g->players[i].lives = LIVES_PER_PLAYER;
         g->players[i].last_bomb_hit_ms = 0;
+        g->players[i].bomb_hits = 0;
     }
     for (int i = 0; i < MAX_COINS; ++i)
         spawn_coin(g, &g->coins[i], true);
     for (int i = 0; i < MAX_BOMBS; ++i)
         spawn_bomb(g, &g->bombs[i], true);
 
-    printf("=== Level %d started: bombs cost 3 points ===\n", g->level);
+    printf("=== Level %d started: %d bomb hits cost 1 life ===\n",
+           g->level, g->level == 3 ? 3 : 1);
 }
 
 /* Find the highest score among active players. Every player with that
@@ -418,6 +424,8 @@ static void end_round(Game *g, uint64_t now_ms)
         for (int i = 0; i < MAX_PLAYERS; ++i) {
             g->players[i].x = i * (WIDTH / MAX_PLAYERS) + 55;
             g->players[i].dir = 0;
+            g->players[i].lives = LIVES_PER_PLAYER;
+            g->players[i].bomb_hits = 0;
         }
         for (int i = 0; i < MAX_COINS; ++i) spawn_coin(g, &g->coins[i], true);
         for (int i = 0; i < MAX_BOMBS; ++i) g->bombs[i].active = false;
@@ -459,6 +467,14 @@ int game_num_active(const Game *g)
     for (int i = 0; i < MAX_PLAYERS; i++)
         if (g->players[i].active)
             n++;
+    return n;
+}
+
+int game_num_alive(const Game *g)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_PLAYERS; ++i)
+        if (g->players[i].active && g->players[i].lives > 0) ++n;
     return n;
 }
 
@@ -582,7 +598,8 @@ void game_tick(Game *g, uint64_t now_ms)
             move_bombs(g);
             check_bomb_hits(g, now_ms);
 
-            if (g->level < 3 && now_ms >= g->phase_end_ms)
+            if (g->level < 3 && (now_ms >= g->phase_end_ms ||
+                (g->level == 2 && game_num_alive(g) == 0)))
             {
                 g->ready_players = 0;
                 g->phase = PHASE_LEVEL_BREAK;
@@ -593,7 +610,8 @@ void game_tick(Game *g, uint64_t now_ms)
                     g->bombs[i].active = false;
                 printf("=== Level %d complete: waiting for Continue ===\n", g->level);
             }
-            else if (g->level >= 3 && now_ms >= g->phase_end_ms)
+            else if (g->level >= 3 && (now_ms >= g->phase_end_ms ||
+                     (g->level == 3 && game_num_alive(g) == 0)))
                 end_round(g, now_ms);
             break;
 

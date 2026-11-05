@@ -39,7 +39,6 @@
 #define ROUND_SECONDS    90
 #define LEVEL_ONE_SECONDS (ROUND_SECONDS / 3)
 #define LEVEL_TWO_SECONDS (ROUND_SECONDS / 3)
-#define BOMB_PENALTY 3
 #define BONUS_SECONDS 15
 
 typedef enum
@@ -56,8 +55,9 @@ typedef struct
     bool     active;
     int      x, y; /* top-left corner of the square */
     int      score;
-    int      lives; /* reserved for existing snapshots; never used to eliminate */
+    int      lives;
     uint32_t bomb_seq;
+    int      bomb_hits;
     uint32_t collect_seq; /* increments once for each coin caught */
     uint64_t last_bomb_hit_ms;
     int      dir;  /* latest input: -1 left, 0 none, +1 right */
@@ -122,6 +122,7 @@ void game_tick(Game *g, uint64_t now_ms);
 
 /* Number of players currently in the game. */
 int  game_num_active(const Game *g);
+int  game_num_alive(const Game *g);
 
 /* Debug: print phase, timer, scores and coins to the terminal. */
 void game_print(const Game *g);

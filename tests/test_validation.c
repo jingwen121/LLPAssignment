@@ -212,6 +212,8 @@ static void test_server(const char *root)
                 case 30: bad.ready_players = 32; break;
                 case 31: memset(bad.player_names[0], 'x', sizeof(bad.player_names[0])); break;
                 case 32: bad.player_names[0][0] = '\n'; break;
+                case 33: bad.player_bomb_hits[0] = -1; break;
+                case 34: bad.player_bomb_hits[0] = 3; break;
             }
 
             // Kind 16 deliberately bypasses net_server_state so the sequence is
@@ -910,7 +912,7 @@ int main(int argc, char **argv)
 
     // Wait for each rejection before sending the next malformed sample so a
     // depth-1 reader cannot replace it before the client has a chance to inspect it
-    for (int kind = 1; kind <= 32; ++kind)
+    for (int kind = 1; kind <= 34; ++kind)
     {
         before = atomic_load(&shared->clients[0].rejected);
         atomic_store(&shared->bad_snapshot, kind);
