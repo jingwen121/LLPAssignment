@@ -298,43 +298,81 @@ recognized. These stores belong to a particular Linux user and distro.
 
 ### LAN discovery on Windows
 
-Both computers must be able to discover the same server. WSL's default NAT
-networking can block DDS discovery between computers. On supported Windows 11
-systems (Windows 11 22H2 or later), update `%UserProfile%\.wslconfig` on both
-computers, merging this into any existing `[wsl2]` section:
+Configure this on the host and every guest. Mirrored networking requires Windows
+11 22H2 or later and a current WSL installation.
+
+**1. Enable mirrored networking.** Merge this into `%UserProfile%\.wslconfig`:
 
 ```ini
 [wsl2]
 networkingMode=mirrored
 ```
 
-Apply the change with `wsl --shutdown` in PowerShell, then reopen WSL and the game.
-This stops all running WSL distributions, so finish other WSL work first.
+Close the game, run `wsl --shutdown` in PowerShell and reopen WSL. This also stops
+other WSL applications. `wslinfo --networking-mode` should report `mirrored`.
 
-If discovery is still blocked, run the following in an administrator PowerShell
-window on each computer. Replace `192.168.1.0/24` with your trusted LAN subnet:
+**2. Identify the game LAN.** Open **PowerShell as administrator**, from any
+folder:
 
 ```powershell
-New-NetFirewallHyperVRule -Name "CoinRushDDS" -DisplayName "Coin Rush DDS" `
-  -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
-  -Protocol UDP -LocalPorts 17900-17941 -RemoteAddresses 192.168.1.0/24 `
-  -Action Allow
+Get-NetIPAddress -AddressFamily IPv4 |
+  Select-Object InterfaceAlias, IPAddress, PrefixLength
+
+$lanSubnet = (Read-Host 'Trusted game LAN subnet in CIDR notation').Trim()
 ```
 
-The normal game configuration uses DDS participant indices 0-15. The rule is
-restricted to its UDP ports and the specified subnet, using DDS domain **42**.
-Apply the rule only on the trusted LAN where you are playing. If the rule name
-already exists, inspect/update it rather than repeatedly creating it. Managed
-networks may require an administrator to approve Windows/Hyper-V firewall policy
-or multicast access. A successful ping tests ICMP; it does not prove DDS UDP
-discovery or the secure handshake is working.
+Use the network address and prefix for the physical Wi-Fi or Ethernet interface,
+not a Docker, VPN or WSL NAT interface. Use the actual prefix length rather than
+assuming `/24`. Computers on the same subnet use the same CIDR.
 
-Do not disable certificate checks, encryption, or the entire firewall to make a
-room join. A network that blocks peer-to-peer or multicast traffic may require
-an administrator-approved network or explicit DDS discovery configuration.
-Windows TCP `netsh interface portproxy` is not a fix for this UDP discovery flow.
-See Microsoft's [WSL networking guidance](https://learn.microsoft.com/en-us/windows/wsl/networking)
-and [Hyper-V firewall reference](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall).
+**3. Create both rules.** Run once per PC. If these names already exist, use
+step 4 instead.
+
+```powershell
+New-NetFirewallRule -Name 'CoinRush-LAN-UDP' -DisplayName 'Coin Rush LAN' `
+  -Direction Inbound -Action Allow -Profile Any `
+  -Protocol UDP -LocalPort 17900-17941 -RemoteAddress $lanSubnet
+
+New-NetFirewallHyperVRule -Name 'CoinRush-WSL-UDP' -DisplayName 'Coin Rush WSL' `
+  -Direction Inbound -Action Allow `
+  -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+  -Protocol UDP -LocalPorts 17900-17941 -RemoteAddresses $lanSubnet
+```
+
+The two rules cover Windows Firewall and WSL's Hyper-V firewall. The UDP range
+covers DDS domain **42** with participant indices **0-15**. Both address filters
+are restricted to the supplied LAN.
+
+**4. Update existing rules after changing networks.** Set `$lanSubnet` from step
+2 in the same administrator PowerShell session, then run:
+
+```powershell
+Get-NetFirewallRule -Name 'CoinRush-LAN-UDP' |
+  Get-NetFirewallAddressFilter |
+  Set-NetFirewallAddressFilter -RemoteAddress $lanSubnet
+
+Set-NetFirewallHyperVRule -Name 'CoinRush-WSL-UDP' `
+  -RemoteAddresses $lanSubnet -Enabled True
+```
+
+**5. Verify the effective settings.**
+
+```powershell
+Get-NetFirewallRule -Name 'CoinRush-LAN-UDP' |
+  Get-NetFirewallAddressFilter | Select-Object RemoteAddress
+Get-NetFirewallRule -Name 'CoinRush-LAN-UDP' |
+  Get-NetFirewallPortFilter | Select-Object Protocol, LocalPort
+Get-NetFirewallHyperVRule -PolicyStore ActiveStore -Name 'CoinRush-WSL-UDP' |
+  Format-List Enabled, Action, Protocol, LocalPorts, RemoteAddresses, EnforcementStatus
+```
+
+Start the server and clients, create a room and join with its code. Guests still
+need distinct credentials issued by that host. Changing the network rules does
+not require resending the packages.
+
+References: [WSL networking](https://learn.microsoft.com/en-us/windows/wsl/networking)
+and [Hyper-V firewall](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall).
+
 
 ## Testing
 
@@ -692,8 +730,9 @@ Check these in order:
    DDS release. Check the version in the distro actually launching each process.
 3. Give each guest a different invite from this host. Check the CA fingerprints
    if unsure. The server log should show another player joining that room.
-4. Configure mirrored WSL networking and the limited UDP firewall allowance
-   described in [LAN discovery](#lan-discovery-on-windows) on both computers.
+4. Configure mirrored WSL networking and both scoped UDP firewall rules
+   described in [LAN discovery](#lan-discovery-on-windows) on every computer.
+   Recheck the address filters after changing networks.
 5. Check guest Wi-Fi/client isolation, VPN adapters/routes, multicast restrictions,
    and institutional network policy. Use an approved network allowing peer traffic.
 

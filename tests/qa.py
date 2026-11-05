@@ -30,6 +30,25 @@ LOCAL_DDS = """<CycloneDDS><Domain Id="42"><General><Interfaces>
 </Discovery></Domain></CycloneDDS>"""
 
 
+def local_dds_configuration():
+    # Mirrored WSL can route 127.0.0.1 through Windows instead of Linux lo.
+    # An existing non-127 alias assigned to lo keeps QA traffic inside Linux.
+    try:
+        interfaces = json.loads(subprocess.check_output(
+            ["ip", "-j", "-4", "address", "show", "dev", "lo"],
+            text=True, stderr=subprocess.DEVNULL))
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return LOCAL_DDS
+    for interface in interfaces:
+        for address in interface.get("addr_info", []):
+            local = address.get("local", "")
+            if (address.get("family") == "inet"
+                    and local and not local.startswith("127.")):
+                return LOCAL_DDS.replace('name="lo"', f'address="{local}"').replace(
+                    'Peer Address="127.0.0.1"', f'Peer Address="{local}"')
+    return LOCAL_DDS
+
+
 def require(condition, explanation):
     # Do not use Python assert for external checks; python -O must still fail QA
     if not condition:
@@ -72,7 +91,7 @@ def prepare():
     for directory in (TRUSTED, FOREIGN):
         if not directory.exists():
             run(["bash", "scripts/security.sh", directory], f"create-{directory.name}.log")
-    os.environ["CYCLONEDDS_URI"] = LOCAL_DDS
+    os.environ["CYCLONEDDS_URI"] = local_dds_configuration()
     versions = subprocess.check_output(
         ["pkg-config", "--modversion", "CycloneDDS", "glfw3"], text=True).splitlines()
     (WORK / "environment.json").write_text(json.dumps({
